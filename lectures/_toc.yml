@@ -2,7 +2,7 @@
 #
 # It carries a deliberately small, stable subset of lecture-python-intro so that
 # a red run means an ACTION regression rather than lecture content drift. The
-# full book reddened this repo in April 2026 (a raising cell in inequality.md)
+# full book reddened this repo in April 2026 (a cell in inequality.md raised an exception)
 # and it stayed red and ignored for months — a canary whose failures are usually
 # not about the thing it tests is a canary nobody reads.
 #
