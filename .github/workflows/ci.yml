@@ -20,21 +20,21 @@ jobs:
       
       - name: Restore Build Cache
         id: cache
-        uses: quantecon/actions/restore-jupyter-cache@v0.6.0
+        uses: quantecon/actions/restore-jupyter-cache@v0
         with:
           cache-type: 'build'
           source-dir: 'lectures'
           save-cache: 'true'
       
       - name: Build PDF
-        uses: quantecon/actions/build-lectures@v0.6.0
+        uses: quantecon/actions/build-lectures@v0
         with:
           source-dir: 'lectures'
           builder: 'pdflatex'
           upload-failure-reports: true
       
       - name: Build Notebooks
-        uses: quantecon/actions/build-lectures@v0.6.0
+        uses: quantecon/actions/build-lectures@v0
         with:
           source-dir: 'lectures'
           builder: 'jupyter'
@@ -42,7 +42,7 @@ jobs:
       
       - name: Build HTML
         id: build
-        uses: quantecon/actions/build-lectures@v0.6.0
+        uses: quantecon/actions/build-lectures@v0
         with:
           source-dir: 'lectures'
           builder: 'html'
@@ -51,7 +51,7 @@ jobs:
           upload-failure-reports: true
       
       - name: Deploy to Netlify
-        uses: quantecon/actions/preview-netlify@v0.6.0
+        uses: quantecon/actions/preview-netlify@v0
         with:
           build-dir: ${{ steps.build.outputs.build-path }}
           netlify-auth-token: ${{ secrets.NETLIFY_AUTH_TOKEN }}

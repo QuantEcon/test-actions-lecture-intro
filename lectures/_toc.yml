@@ -1,94 +1,34 @@
+# Trimmed toc — this repo is a CANARY for QuantEcon/actions, not a lecture site.
+#
+# It carries a deliberately small, stable subset of lecture-python-intro so that
+# a red run means an ACTION regression rather than lecture content drift. The
+# full book reddened this repo in April 2026 (a raising cell in inequality.md)
+# and it stayed red and ignored for months — a canary whose failures are usually
+# not about the thing it tests is a canary nobody reads.
+#
+# Selection criteria, applied mechanically over all 50 lectures:
+#   - no network access at build time (no remote read_csv, wbgapi, requests)
+#   - no heavy/optional imports (statsmodels, sklearn, cvxpy, numba) or pip installs
+#   - no local {doc} cross-references (a dangling one is fatal under -W)
+#   - no {cite} references
+# `only_build_toc_files: true` in _config.yml means the other lectures stay on
+# disk but are not built. To restore the full book, see git history for this file.
+#
+# Between them these five exercise: matplotlib figures, numpy linear algebra,
+# scipy/random sampling, iterative dynamics, LaTeX-heavy math (the pdflatex
+# builder), and static `_static/` figure copying (short_path).
 format: jb-book
 root: intro
 parts:
-- caption: Introduction
+- caption: Canary lectures
   numbered: true
   chapters:
-  - file: about
-- caption: Economic Data 
-  numbered: true
-  chapters:
-  - file: long_run_growth
-  - file: business_cycle
-  - file: inflation_history
-  - file: french_rev 
-  - file: inequality
-- caption: Foundations
-  numbered: true
-  chapters:
-  - file: intro_supply_demand
-  - file: linear_equations
-  - file: complex_and_trig
   - file: geom_series
-- caption: "Linear Dynamics: Finite Horizons"
-  numbered: true
-  chapters:
-  - file: pv
-  - file: cons_smooth
-  - file: tax_smooth
-  - file: equalizing_difference
-  - file: cagan_ree
-  - file: cagan_adaptive
-- caption: "Linear Dynamics: Infinite Horizons"
-  numbered: true
-  chapters:
-  - file: eigen_I
-  - file: greek_square 
-- caption: Probability and Distributions
-  numbered: true
-  chapters:
-  - file: prob_dist
-  - file: lln_clt
-  - file: monte_carlo
-  - file: heavy_tails
-  - file: schelling
-- caption: Nonlinear Dynamics
-  numbered: true
-  chapters:
-  - file: scalar_dynam
-  - file: solow
-  - file: cobweb
-  - file: olg
-  - file: commod_price
-- caption: Monetary-Fiscal Policy Interactions
-  numbered: true
-  chapters:
-  - file: money_inflation
-  - file: unpleasant
-  - file: money_inflation_nonlinear
-  - file: laffer_adaptive
-- caption: Stochastic Dynamics
-  numbered: true
-  chapters:
-  - file: ar1_processes
-  - file: markov_chains_I
-  - file: markov_chains_II
-  - file: time_series_with_matrices
-- caption: Optimization
-  numbered: true
-  chapters:
-  - file: lp_intro
   - file: short_path
-- caption: Modeling in Higher Dimensions
-  numbered: true
-  chapters:
-  - file: eigen_II
-  - file: input_output
-  - file: lake_model
-  - file: networks
-- caption: Markets and Competitive Equilibrium
-  numbered: true
-  chapters:
-  - file: supply_demand_multiple_goods
-  - file: supply_demand_heterogeneity
-- caption: Estimation
-  numbered: true
-  chapters:
-  - file: simple_linear_regression
-  - file: mle
+  - file: lln_clt
+  - file: solow
+  - file: linear_equations
 - caption: Other
   numbered: true
   chapters:
-  - file: troubleshooting
   - file: zreferences
-  - file: status
