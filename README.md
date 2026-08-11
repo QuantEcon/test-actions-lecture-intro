@@ -10,7 +10,21 @@ An Undergraduate Lecture Series for the Foundations of Computational Economics
 
 ## Purpose
 
-This repository is the **canary** for [QuantEcon/actions](https://github.com/QuantEcon/actions) — stage 2 of [actions#100](https://github.com/QuantEcon/actions/issues/100). It is a clone of `lecture-python-intro` wired to the composite actions at the floating `@v0` tag, so that a real lecture-shaped build exercises the parts of the chain that the in-repo PR harness structurally cannot reach.
+This repository is the **experiment and integration sandbox** for [QuantEcon/actions](https://github.com/QuantEcon/actions), and its post-release canary — stage 2 of [actions#100](https://github.com/QuantEcon/actions/issues/100). It is a clone of `lecture-python-intro` wired to the composite actions at the floating `@v0` tag, so that a real lecture-shaped build exercises the parts of the chain that the in-repo PR harness structurally cannot reach.
+
+The question it answers is **"does this work against a real-ish lecture repo?"** — try a new action, a new version, a new workflow shape, and find out end to end. Its history is exactly that: PR-scoped build caching (#36), PDF and notebook builds in CI preview (#35), the `@v0` migration (#26).
+
+### This repo is not the release gate
+
+It cannot be, and that is deliberate rather than a gap to close here. A gate has to mean *red stops the release*, and three properties of this repo make red ambiguous — all three of which are the right properties for a sandbox:
+
+- it runs `ghcr.io/quantecon/quantecon-build:latest`, so the environment moves underneath it;
+- Dependabot is enabled and its PRs change build behaviour;
+- it pins `@v0`, which is the tag a release *moves* — so it always exercises the previous release, never the candidate.
+
+The first two are how upstream breakage gets discovered early, which is a sandbox's job and the opposite of a gate's. Release gating lives in a separate frozen fixture, `test-actions-release` — see [actions#136](https://github.com/QuantEcon/actions/issues/136) and [actions#135](https://github.com/QuantEcon/actions/issues/135).
+
+So: **experiment here; gate there.** If you are about to add something to this repo to make a release safer, it probably belongs in `test-actions-release` instead.
 
 It is the only place `publish-gh-pages` and `preview-netlify` are exercised at all. Neither is testable inside the actions repo: a composite action is all-or-nothing, so `uses: ./publish-gh-pages` dies at `configure-pages` before reaching any of its own logic, and testing the previews there would need live deploy credentials on a `pull_request` workflow.
 
