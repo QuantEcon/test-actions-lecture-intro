@@ -20,7 +20,7 @@ It cannot be, and that is deliberate rather than a gap to close here. A gate has
 
 - it runs `ghcr.io/quantecon/quantecon-build:latest`, so the environment moves underneath it;
 - Dependabot is enabled and its PRs change build behaviour;
-- it pins `@v0`, which is the tag a release *moves* — so it always exercises the previous release, never the candidate.
+- it pins `@v0`, so it only ever exercises a **published** release, never a candidate — and because a release *moves* that tag, consumers are on the new code at the same moment this repo is.
 
 The first two are how upstream breakage gets discovered early, which is a sandbox's job and the opposite of a gate's. Release gating lives in a separate frozen fixture, `test-actions-release` — see [actions#136](https://github.com/QuantEcon/actions/issues/136) and [actions#135](https://github.com/QuantEcon/actions/issues/135).
 
