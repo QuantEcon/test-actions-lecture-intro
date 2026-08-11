@@ -57,9 +57,9 @@ We use matplotlib to replicate several of the graphs with which  {cite}`sargent_
 ## Data Sources
 
 This lecture uses data from three spreadsheets assembled by {cite}`sargent_velde1995`:
-  * [datasets/fig_3.xlsx](https://github.com/QuantEcon/lecture-python-intro/blob/main/lectures/datasets/fig_3.xlsx)
-  * [datasets/dette.xlsx](https://github.com/QuantEcon/lecture-python-intro/blob/main/lectures/datasets/dette.xlsx)
-  * [datasets/assignat.xlsx](https://github.com/QuantEcon/lecture-python-intro/blob/main/lectures/datasets/assignat.xlsx)
+  * [datasets/fig_3.xlsx](https://github.com/QuantEcon/data-lectures/raw/main/lectures/fig_3.xlsx)
+  * [datasets/dette.xlsx](https://github.com/QuantEcon/data-lectures/raw/main/lectures/dette.xlsx)
+  * [datasets/assignat.xlsx](https://github.com/QuantEcon/data-lectures/raw/main/lectures/assignat.xlsx)
 
 ```{code-cell} ipython3
 import numpy as np
@@ -67,8 +67,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 plt.rcParams.update({'font.size': 12})
 
-base_url = 'https://github.com/QuantEcon/lecture-python-intro/raw/'\
-           + 'main/lectures/datasets/'
+base_url = 'https://github.com/QuantEcon/data-lectures/raw/'\
+           + 'main/lectures/'
 
 fig_3_url = f'{base_url}fig_3.xlsx'
 dette_url = f'{base_url}dette.xlsx'
