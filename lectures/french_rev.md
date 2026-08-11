@@ -57,9 +57,9 @@ We use matplotlib to replicate several of the graphs with which  {cite}`sargent_
 ## Data Sources
 
 This lecture uses data from three spreadsheets assembled by {cite}`sargent_velde1995`:
-  * [datasets/fig_3.xlsx](https://github.com/QuantEcon/data-lectures/raw/main/lectures/fig_3.xlsx)
-  * [datasets/dette.xlsx](https://github.com/QuantEcon/data-lectures/raw/main/lectures/dette.xlsx)
-  * [datasets/assignat.xlsx](https://github.com/QuantEcon/data-lectures/raw/main/lectures/assignat.xlsx)
+  * [fig_3.xlsx](https://github.com/QuantEcon/data-lectures/blob/main/lectures/fig_3.xlsx)
+  * [dette.xlsx](https://github.com/QuantEcon/data-lectures/blob/main/lectures/dette.xlsx)
+  * [assignat.xlsx](https://github.com/QuantEcon/data-lectures/blob/main/lectures/assignat.xlsx)
 
 ```{code-cell} ipython3
 import numpy as np
