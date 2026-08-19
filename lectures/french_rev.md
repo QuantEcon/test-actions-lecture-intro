@@ -65,6 +65,8 @@ This lecture uses data from three spreadsheets assembled by {cite}`sargent_velde
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from io import BytesIO
+import requests
 plt.rcParams.update({'font.size': 12})
 
 base_url = 'https://github.com/QuantEcon/data-lectures/raw/'\
@@ -706,8 +708,10 @@ def fit(x, y):
 
 ```{code-cell} ipython3
 # Load data
-caron = np.load('datasets/caron.npy')
-nom_balances = np.load('datasets/nom_balances.npy')
+caron_response = requests.get(f'{base_url}caron.npy')
+nom_balances_response = requests.get(f'{base_url}nom_balances.npy')
+caron = np.load(BytesIO(caron_response.content))
+nom_balances = np.load(BytesIO(nom_balances_response.content))
 
 infl = np.concatenate(([np.nan], 
       -np.log(caron[1:63, 1] / caron[0:62, 1])))
