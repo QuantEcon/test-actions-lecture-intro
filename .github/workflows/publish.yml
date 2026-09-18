@@ -25,7 +25,7 @@ jobs:
       url: ${{ steps.deploy.outputs.page-url }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       
       - name: Build PDF
         uses: quantecon/actions/build-lectures@v0
