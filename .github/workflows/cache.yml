@@ -21,7 +21,11 @@ jobs:
     
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          # Full history: each page's "Last changed" date and changelog come
+          # from git log. A shallow clone dates every page to the checkout commit.
+          fetch-depth: 0
       
       - name: Build and Cache
         uses: quantecon/actions/build-jupyter-cache@v0
