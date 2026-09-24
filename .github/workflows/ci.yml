@@ -50,8 +50,18 @@ jobs:
           html-copy-notebooks: true
           upload-failure-reports: true
       
-      - name: Deploy to Netlify
-        uses: quantecon/actions/preview-netlify@v0
+      # Candidate for QuantEcon/actions#174: the preview actions from that branch,
+      # not a release. Cloudflare first, so its result stands on its own.
+      - name: Deploy to Cloudflare Pages (candidate, actions#174)
+        uses: quantecon/actions/preview-cloudflare@claude/105-preview-deploy
+        with:
+          build-dir: ${{ steps.build.outputs.build-path }}
+          cloudflare-api-token: ${{ secrets.CLOUDFLARE_QE_PAGES_TOKEN }}
+          cloudflare-account-id: ${{ secrets.CLOUDFLARE_QE_ACCOUNT_ID }}
+          project-name: qe-preview-canary
+
+      - name: Deploy to Netlify (candidate, actions#174)
+        uses: quantecon/actions/preview-netlify@claude/105-preview-deploy
         with:
           build-dir: ${{ steps.build.outputs.build-path }}
           netlify-auth-token: ${{ secrets.NETLIFY_AUTH_TOKEN }}
