@@ -56,7 +56,7 @@ jobs:
         uses: quantecon/actions/preview-cloudflare@claude/105-preview-deploy
         with:
           build-dir: ${{ steps.build.outputs.build-path }}
-          cloudflare-api-token: ${{ secrets.CLOUDFLARE_QE_PAGES_TOKEN }}
+          cloudflare-api-token: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
           cloudflare-account-id: ${{ secrets.CLOUDFLARE_QE_ACCOUNT_ID }}
           project-name: qe-preview-canary
 
