@@ -26,7 +26,7 @@ The first two are how upstream breakage gets discovered early, which is a sandbo
 
 So: **experiment here; gate there.** If you are about to add something to this repo to make a release safer, it probably belongs in `test-actions-release` instead.
 
-It is the only place `publish-gh-pages` and `preview-netlify` are exercised at all. Neither is testable inside the actions repo: a composite action is all-or-nothing, so `uses: ./publish-gh-pages` dies at `configure-pages` before reaching any of its own logic, and testing the previews there would need live deploy credentials on a `pull_request` workflow.
+It is the only place `publish-gh-pages`, `preview-netlify` and `preview-cloudflare` are exercised at all. None is testable inside the actions repo: a composite action is all-or-nothing, so `uses: ./publish-gh-pages` dies at `configure-pages` before reaching any of its own logic, and testing the previews there would need live deploy credentials on a `pull_request` workflow.
 
 **The lecture set is deliberately small.** `lectures/_toc.yml` carries five self-contained lectures rather than the full book, chosen mechanically: no build-time network access, no heavy or optional imports, no local `{doc}` cross-references, no citations. The other lectures stay on disk but are not built (`only_build_toc_files: true`).
 

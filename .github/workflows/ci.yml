@@ -50,6 +50,17 @@ jobs:
           html-copy-notebooks: true
           upload-failure-reports: true
       
+      # preview-cloudflare runs on every canary PR next to preview-netlify, so a
+      # release staged here (QuantEcon/actions CONTRIBUTING.md, Staged Releases)
+      # exercises both preview providers. Project: qe-preview-canary.
+      - name: Deploy to Cloudflare Pages
+        uses: quantecon/actions/preview-cloudflare@v0
+        with:
+          build-dir: ${{ steps.build.outputs.build-path }}
+          cloudflare-api-token: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
+          cloudflare-account-id: ${{ secrets.CLOUDFLARE_QE_ACCOUNT_ID }}
+          project-name: qe-preview-canary
+      
       - name: Deploy to Netlify
         uses: quantecon/actions/preview-netlify@v0
         with:
