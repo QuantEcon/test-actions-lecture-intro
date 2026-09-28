@@ -1,0 +1,1087 @@
+# THROWAWAY: QuantEcon/actions#143 spike ("settle the two gate-mechanism
+# assumptions before building for them"). Lives only on the canary branch
+# spike/143-local-uses. NEVER merge it; delete the branch when the evidence
+# is captured.
+#
+# Q1: does `uses: ./actions-repo/<action>` (QuantEcon/actions checked out at a
+#     candidate SHA into a subdirectory) resolve and run inside a `container:`
+#     job, and does anything the actions reach through their action path
+#     break there (#83, actions/runner#2185)?
+# Q2: on a non-pull_request event, do preview-netlify and preview-cloudflare go
+#     green having deployed nothing?
+#
+# Jobs (push and workflow_dispatch):
+#   resolve          validates the candidate SHA (format, and reachable from a
+#                    QuantEcon/actions branch or tag) and pins :latest to one
+#                    digest that every container job uses
+#   probe-container  github.action_path (in a script / via env) vs
+#   probe-host       $GITHUB_ACTION_PATH, for a local action, in a container
+#                    and on the host
+#   q1-local         the canary's ci.yml chain through ./actions-repo/*, then
+#                    both preview actions with dummy tokens (Q2), then a
+#                    one-line-ungated copy of each as a positive control
+#   q1-remote        the same chain through quantecon/actions/*@<literal SHA>
+#   bjc-local        ./actions-repo/build-jupyter-cache as shipped (nested @v0)
+#   bjc-rewired      the same with its nested @v0 calls rewritten to ./actions-repo
+#   evidence         reads every job's raw log through the API, checks what no
+#                    step can see from inside, writes the verdict, keeps the logs
+# Jobs (pull_request from this branch, a DRAFT PR that is never merged):
+#   resolve, pr-preview (real Netlify and Cloudflare deploys through the local
+#   path, with the canary's secrets), evidence
+#
+# Every assertion fails loudly when the thing it checks did not happen, and
+# records its evidence in the job summary. A value nobody wrote never reads as
+# success.
+#
+# SAFETY (absolute):
+#   - publish-gh-pages is not referenced anywhere; no job has pages, id-token,
+#     issues or actions: write, and no job declares an environment:.
+#   - Real secrets appear ONLY in pr-preview, which runs only on a same-repo
+#     pull_request whose head is this branch, always tests the literal default
+#     candidate (inputs are empty on pull_request), and deploys only after the
+#     checkouts were verified and every build succeeded. push and dispatch runs
+#     pass dummy strings, so no deploy could succeed even if a gate misfired.
+#   - The candidate must be reachable from a QuantEcon/actions branch or tag
+#     (resolve checks it in a bare clone, which never holds refs/pull/*), so a
+#     fork-PR head or fork-network ("impostor") commit is refused before any
+#     job checks it out.
+#   - No checkout persists the job token (persist-credentials: false).
+#   - Container jobs pull the image exactly as the canary's ci.yml does (no
+#     credentials block: the runner logs in to ghcr.io with the job token, which
+#     needs packages: read).
+#   - build-jupyter-cache runs with create-issue-on-failure: 'false' and no
+#     issues permission.
+#   - Caches written here are scoped to this branch (or to the PR's merge ref).
+#   - Never push a publish* tag from this branch (publish.yml still exists on
+#     it). Never dispatch ci.yml, cache.yml or linkcheck.yml at this ref; on
+#     this branch all three carry a job-level guard that skips them here anyway.
+
+name: Spike 143 (local uses in a container)
+
+on:
+  push:
+    branches: [spike/143-local-uses]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      candidate:
+        description: 'QuantEcon/actions commit to test (full 40-character SHA)'
+        required: false
+        default: c0ac11130e1dd3dd7e1cca07ef26b5781947186b
+      image:
+        description: 'Optional ghcr.io/quantecon/quantecon-build@sha256:<digest>; empty resolves :latest now'
+        required: false
+        default: ''
+
+permissions: {}
+
+# One run per event and ref; a newer push supersedes an older one. Dispatches
+# never cancel each other. No group is shared with the canary's own 'pages' or
+# 'cache-build' groups.
+concurrency:
+  group: spike-143-${{ github.event_name }}-${{ github.ref }}${{ github.event_name == 'workflow_dispatch' && format('-{0}', github.run_id) || '' }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # The remote control's ref. `uses:` cannot take an expression, so this SHA is
+  # also written literally in every q1-remote `uses:` line; keep them equal.
+  CONTROL_SHA: c0ac11130e1dd3dd7e1cca07ef26b5781947186b
+
+jobs:
+  resolve:
+    name: 'resolve: candidate SHA and image digest'
+    if: github.event_name != 'pull_request' || github.head_ref == 'spike/143-local-uses'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      packages: read          # read the image manifest from GHCR
+    outputs:
+      candidate: ${{ steps.candidate.outputs.sha }}
+      trusted_by: ${{ steps.trust.outputs.refs }}
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - name: Validate the candidate SHA
+        id: candidate
+        env:
+          # inputs are empty on push and pull_request, so those runs always test
+          # the default; a real secret (pull_request only) never meets a
+          # dispatcher-chosen ref.
+          REQUESTED: ${{ inputs.candidate || 'c0ac11130e1dd3dd7e1cca07ef26b5781947186b' }}
+        run: |
+          if [[ ! "$REQUESTED" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::candidate [$REQUESTED] is not a full 40-character lowercase commit SHA"
+            exit 1
+          fi
+          echo "sha=$REQUESTED" >> "$GITHUB_OUTPUT"
+          echo "Candidate: QuantEcon/actions@$REQUESTED"
+
+      # actions/checkout fetches ANY commit GitHub will serve for
+      # QuantEcon/actions by SHA, including fork-PR heads (refs/pull/*/head)
+      # and fork-network commits. A full bare clone holds only refs/heads/* and
+      # refs/tags/* (and is not a partial clone, so nothing is fetched lazily),
+      # so a commit no branch or tag contains is refused here and every other
+      # job, all of which need this one, is skipped. Pushing a branch or tag to
+      # QuantEcon/actions needs write access: that is the trust boundary.
+      - name: Check the candidate is on a QuantEcon/actions branch or tag
+        id: trust
+        env:
+          CANDIDATE: ${{ steps.candidate.outputs.sha }}
+        run: |
+          set -euo pipefail
+          R="$RUNNER_TEMP/qa.git"
+          rm -rf "$R"
+          git clone --quiet --bare https://github.com/QuantEcon/actions.git "$R"
+          refs=$(git -C "$R" for-each-ref --contains "$CANDIDATE" --format='%(refname)' refs/heads refs/tags 2>/dev/null || true)
+          if [ -z "$refs" ]; then
+            echo "::error::candidate $CANDIDATE is not contained in any QuantEcon/actions branch or tag (a fork-PR head or fork-network commit?); refusing it"
+            exit 1
+          fi
+          # main and tags first; awk reads every line, so no SIGPIPE under pipefail.
+          short=$(printf '%s\n' "$refs" | awk '
+            { sub("^refs/heads/", ""); sub("^refs/tags/", "tag:") }
+            $0 == "main" || /^tag:/ { pri[++np] = $0; next }
+            { oth[++no] = $0 }
+            END {
+              n = 0
+              for (i = 1; i <= np && n < 8; i++) { printf "%s ", pri[i]; n++ }
+              for (i = 1; i <= no && n < 8; i++) { printf "%s ", oth[i]; n++ }
+              if (np + no > n) printf "(+%d more)", np + no - n
+            }')
+          echo "refs=$short" >> "$GITHUB_OUTPUT"
+          echo "Candidate $CANDIDATE is contained in: $short"
+
+      # The canary runs :latest, which moved on 2026-09-25 and is rebuilt every
+      # Monday. Resolving it once here means the local and remote jobs run the
+      # same image, so a difference between them is attributable.
+      # The login is required: ghcr.io refuses an anonymous pull token for
+      # quantecon/quantecon-build ("authentication required"), and the canary's
+      # own container jobs pull it with the job token (packages: read).
+      - name: Resolve the container image to one digest
+        id: image
+        env:
+          REQUESTED: ${{ inputs.image || 'ghcr.io/quantecon/quantecon-build:latest' }}
+          CANDIDATE: ${{ steps.candidate.outputs.sha }}
+          TRUSTED_BY: ${{ steps.trust.outputs.refs }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "$REQUESTED" =~ ^ghcr\.io/quantecon/quantecon-build@sha256:[0-9a-f]{64}$ ]]; then
+            IMAGE="$REQUESTED"
+          elif [ "$REQUESTED" = "ghcr.io/quantecon/quantecon-build:latest" ]; then
+            echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin >/dev/null
+            INSPECT=$(docker buildx imagetools inspect "$REQUESTED") \
+              || { echo "::error::could not inspect $REQUESTED"; exit 1; }
+            docker logout ghcr.io >/dev/null || true
+            echo "$INSPECT" | head -n 5
+            DIGEST=$(awk '$1 == "Digest:" { print $2; exit }' <<<"$INSPECT")
+            if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::could not resolve $REQUESTED to a digest (got [$DIGEST])"
+              exit 1
+            fi
+            IMAGE="ghcr.io/quantecon/quantecon-build@$DIGEST"
+          else
+            echo "::error::image [$REQUESTED] must be ghcr.io/quantecon/quantecon-build@sha256:<64 hex>, or empty for :latest"
+            exit 1
+          fi
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Spike 143 inputs ($GITHUB_EVENT_NAME)"
+            echo "| item | value |"
+            echo "|---|---|"
+            echo "| candidate (./actions-repo) | \`$CANDIDATE\` |"
+            echo "| candidate contained in | $TRUSTED_BY |"
+            echo "| remote control | \`$CONTROL_SHA\` |"
+            echo "| image requested | \`$REQUESTED\` |"
+            echo "| image every container job uses | \`$IMAGE\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ==========================================================================
+  # Path probe: github.action_path vs $GITHUB_ACTION_PATH for a LOCAL action
+  # ==========================================================================
+  probe-container:
+    name: 'probe-container: action_path vs GITHUB_ACTION_PATH in a container'
+    needs: resolve
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read          # pull the container image
+    container:
+      image: ${{ needs.resolve.outputs.image }}
+    outputs:
+      ok: ${{ steps.assert.outputs.ok }}
+      inline: ${{ steps.assert.outputs.inline }}
+      envexpr: ${{ steps.assert.outputs.envexpr }}
+    steps:
+      - name: Checkout canary (workspace root; before the candidate checkout)
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Checkout candidate QuantEcon/actions into ./actions-repo
+        uses: actions/checkout@v7
+        with:
+          repository: QuantEcon/actions
+          ref: ${{ needs.resolve.outputs.candidate }}
+          path: actions-repo
+          persist-credentials: false
+
+      - name: Verify checkouts
+        env:
+          IMAGE: ${{ needs.resolve.outputs.image }}
+          JOB_LABEL: probe-container
+          CANDIDATE: ${{ needs.resolve.outputs.candidate }}
+        run: bash .github/spike-143/scripts/check-candidate.sh "$CANDIDATE" preview-netlify
+
+      # The gate's exact shape: an action at a subpath of a second repository's
+      # checkout, whose sibling is the candidate's real ../scripts directory.
+      - name: Place a copy of the probe inside the candidate checkout
+        run: |
+          rm -rf actions-repo/spike-143-probe
+          cp -r .github/spike-143/probe actions-repo/spike-143-probe
+          ls -la actions-repo/spike-143-probe actions-repo/scripts/detect-changed-lectures.sh
+
+      - name: Probe ./.github/spike-143/probe (committed in the canary)
+        id: p_canary
+        uses: ./.github/spike-143/probe
+        with:
+          sibling: ../scripts/probe-sibling.sh
+
+      - name: Probe ./actions-repo/spike-143-probe (subpath of the candidate checkout)
+        id: p_actions
+        uses: ./actions-repo/spike-143-probe
+        with:
+          sibling: ../scripts/detect-changed-lectures.sh
+
+      - name: Assert the probe results (container)
+        id: assert
+        if: ${{ !cancelled() }}
+        env:
+          C_REPORT: ${{ steps.p_canary.outputs.report }}
+          A_REPORT: ${{ steps.p_actions.outputs.report }}
+        run: bash .github/spike-143/scripts/assert-probe.sh container
+
+  probe-host:
+    name: 'probe-host: action_path vs GITHUB_ACTION_PATH on the host'
+    needs: resolve
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      ok: ${{ steps.assert.outputs.ok }}
+    steps:
+      - name: Checkout canary (workspace root; before the candidate checkout)
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Checkout candidate QuantEcon/actions into ./actions-repo
+        uses: actions/checkout@v7
+        with:
+          repository: QuantEcon/actions
+          ref: ${{ needs.resolve.outputs.candidate }}
+          path: actions-repo
+          persist-credentials: false
+
+      - name: Verify checkouts
+        env:
+          JOB_LABEL: probe-host
+          CANDIDATE: ${{ needs.resolve.outputs.candidate }}
+        run: bash .github/spike-143/scripts/check-candidate.sh "$CANDIDATE" preview-netlify
+
+      - name: Place a copy of the probe inside the candidate checkout
+        run: |
+          rm -rf actions-repo/spike-143-probe
+          cp -r .github/spike-143/probe actions-repo/spike-143-probe
+
+      - name: Probe ./.github/spike-143/probe (committed in the canary)
+        id: p_canary
+        uses: ./.github/spike-143/probe
+        with:
+          sibling: ../scripts/probe-sibling.sh
+
+      - name: Probe ./actions-repo/spike-143-probe (subpath of the candidate checkout)
+        id: p_actions
+        uses: ./actions-repo/spike-143-probe
+        with:
+          sibling: ../scripts/detect-changed-lectures.sh
+
+      - name: Assert the probe results (host)
+        id: assert
+        if: ${{ !cancelled() }}
+        env:
+          C_REPORT: ${{ steps.p_canary.outputs.report }}
+          A_REPORT: ${{ steps.p_actions.outputs.report }}
+        run: bash .github/spike-143/scripts/assert-probe.sh host
+
+  # ==========================================================================
+  # Q1 + Q2: the canary's ci.yml chain through LOCAL paths
+  # ==========================================================================
+  q1-local:
+    name: 'q1-local: canary CI chain via ./actions-repo in a container'
+    needs: resolve
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    # Measured on the canary: image pull ~2 min, cold first builder 2.5-3.3 min,
+    # later builders 3-4 s, each CLI npm ci under 1 min. About 10 min worst case.
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: read          # pull the container image
+    container:
+      image: ${{ needs.resolve.outputs.image }}
+    outputs:
+      builds_ok: ${{ steps.assert-builds.outputs.ok }}
+      html_pages: ${{ steps.assert-builds.outputs.html_pages }}
+      html_list_sha: ${{ steps.assert-builds.outputs.html_list_sha }}
+      cache_key: ${{ steps.cache.outputs.cache-key }}
+      q2_ok: ${{ steps.assert-q2.outputs.ok }}
+      ctl_ok: ${{ steps.assert-ctl.outputs.ok }}
+      attribution_ok: ${{ steps.attribution.outputs.ok }}
+    steps:
+      - name: Checkout canary (workspace root; before the candidate checkout)
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Checkout candidate QuantEcon/actions into ./actions-repo
+        uses: actions/checkout@v7
+        with:
+          repository: QuantEcon/actions
+          ref: ${{ needs.resolve.outputs.candidate }}
+          path: actions-repo
+          persist-credentials: false
+
+      - name: Verify checkouts
+        env:
+          IMAGE: ${{ needs.resolve.outputs.image }}
+          JOB_LABEL: q1-local
+          CANDIDATE: ${{ needs.resolve.outputs.candidate }}
+        run: bash .github/spike-143/scripts/check-candidate.sh "$CANDIDATE" restore-jupyter-cache build-lectures preview-netlify preview-cloudflare
+
+      # As canary ci.yml, save-cache included: its actions/cache post: hook is a
+      # nested post step of a LOCAL composite in a container, which nothing has
+      # shown yet. It saves build-<env>--<run_id> on this branch; the other jobs
+      # of this run save the same key, and the losers of that race only log it.
+      - name: Restore build cache (local)
+        id: cache
+        uses: ./actions-repo/restore-jupyter-cache
+        with:
+          cache-type: 'build'
+          source-dir: 'lectures'
+          save-cache: 'true'
+
+      # The restored _build holds main's html. Removing the format outputs (the
+      # execution cache stays, as a PR build would use it) means every output
+      # asserted below can only have been written by this job's builds.
+      - name: Clear restored build outputs
+        env:
+          MATCHED: ${{ steps.cache.outputs.cache-key }}
+        run: |
+          echo "Restored cache: ${MATCHED:-none (cold build)}"
+          for d in html latex jupyter; do
+            if [ -e "_build/$d" ]; then echo "removing restored _build/$d"; rm -rf "_build/$d"; fi
+          done
+          ls -la _build 2>/dev/null || echo "(no _build yet)"
+          mkdir -p "$RUNNER_TEMP/spike-143"
+          touch "$RUNNER_TEMP/spike-143/before-builds"
+          echo "Restored cache \`${MATCHED:-none}\`; _build/{html,latex,jupyter} removed before building." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build PDF (local)
+        id: build-pdf
+        uses: ./actions-repo/build-lectures
+        with:
+          source-dir: 'lectures'
+          builder: 'pdflatex'
+          upload-failure-reports: true
+          failure-artifact-name: spike143-q1-local-pdflatex
+
+      - name: Build Notebooks (local)
+        id: build-nb
+        uses: ./actions-repo/build-lectures
+        with:
+          source-dir: 'lectures'
+          builder: 'jupyter'
+          upload-failure-reports: true
+          failure-artifact-name: spike143-q1-local-jupyter
+
+      - name: Build HTML (local)
+        id: build
+        uses: ./actions-repo/build-lectures
+        with:
+          source-dir: 'lectures'
+          builder: 'html'
+          html-copy-pdf: true
+          html-copy-notebooks: true
+          upload-failure-reports: true
+          failure-artifact-name: spike143-q1-local-html
+
+      - name: Assert build outputs
+        id: assert-builds
+        if: ${{ !cancelled() }}
+        env:
+          LABEL: q1-local
+          PDF_PATH: ${{ steps.build-pdf.outputs.build-path }}
+          NB_PATH: ${{ steps.build-nb.outputs.build-path }}
+          HTML_PATH: ${{ steps.build.outputs.build-path }}
+        run: bash .github/spike-143/scripts/assert-build.sh
+
+      # Also runs when a build failed, so the Q2 evidence does not depend on it.
+      - name: Write the run marker into the site
+        id: site
+        if: ${{ !cancelled() }}
+        env:
+          HTML_PATH: ${{ steps.build.outputs.build-path }}
+          CANDIDATE: ${{ needs.resolve.outputs.candidate }}
+        run: |
+          SITE="${HTML_PATH:-./_build/html}"
+          mkdir -p "$SITE"
+          printf 'spike-143 run=%s.%s event=%s candidate=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_EVENT_NAME" "$CANDIDATE" > "$SITE/spike-143-marker.txt"
+          echo "dir=$SITE" >> "$GITHUB_OUTPUT"
+
+      # ---- Q2: the real preview actions on push/dispatch, DUMMY strings only.
+      # No continue-on-error: "green" must be the step's own conclusion.
+      - name: Preview Netlify (local, dummy token)
+        id: pn_local
+        if: ${{ !cancelled() && steps.site.outcome == 'success' }}
+        uses: ./actions-repo/preview-netlify
+        with:
+          build-dir: ${{ steps.site.outputs.dir }}
+          netlify-auth-token: spike-143-dummy-not-a-token
+          netlify-site-id: 00000000-0000-0000-0000-000000000000
+
+      - name: Preview Cloudflare (local, dummy token)
+        id: pc_local
+        if: ${{ !cancelled() && steps.site.outcome == 'success' }}
+        uses: ./actions-repo/preview-cloudflare
+        with:
+          build-dir: ${{ steps.site.outputs.dir }}
+          cloudflare-api-token: spike-143-dummy-not-a-token
+          cloudflare-account-id: '00000000000000000000000000000000'
+          project-name: spike-143-no-such-project
+
+      - name: Assert Q2 (green, deployed nothing, CLI installed through GITHUB_ACTION_PATH)
+        id: assert-q2
+        if: ${{ !cancelled() }}
+        env:
+          EVENT: ${{ github.event_name }}
+          EXPECT_DIRS: '1'
+          ACTIONS_SRC: actions-repo
+          PN_OUTCOME: ${{ steps.pn_local.outcome }}
+          PN_DEPLOY_URL: ${{ steps.pn_local.outputs.deploy-url }}
+          PN_CHANGED: ${{ steps.pn_local.outputs.changed-files }}
+          PC_OUTCOME: ${{ steps.pc_local.outcome }}
+          PC_DEPLOY_URL: ${{ steps.pc_local.outputs.deploy-url }}
+          PC_DEPLOYMENT_URL: ${{ steps.pc_local.outputs.deployment-url }}
+          PC_CHANGED: ${{ steps.pc_local.outputs.changed-files }}
+        run: bash .github/spike-143/scripts/assert-preview-skipped.sh "q1-local via ./actions-repo"
+
+      # ---- Q2 positive control: the same actions with ONLY the deploy step's
+      # event clause removed must fail on the same dummy token. That is what
+      # makes "success + empty deploy-url" above mean "deploy skipped".
+      - name: 'Positive control: make one-line-ungated copies of both preview actions'
+        id: mkctl
+        if: ${{ !cancelled() && steps.site.outcome == 'success' }}
+        run: bash .github/spike-143/scripts/make-ctl.sh preview-netlify preview-cloudflare
+
+      - name: 'Positive control: ungated preview-netlify, dummy token (must fail)'
+        id: pn_ctl
+        if: ${{ !cancelled() && steps.mkctl.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 6
+        uses: ./actions-repo/preview-netlify-ctl
+        with:
+          build-dir: ${{ steps.site.outputs.dir }}
+          netlify-auth-token: spike-143-dummy-not-a-token
+          netlify-site-id: 00000000-0000-0000-0000-000000000000
+
+      - name: 'Positive control: ungated preview-cloudflare, dummy token (must fail)'
+        id: pc_ctl
+        if: ${{ !cancelled() && steps.mkctl.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 6
+        uses: ./actions-repo/preview-cloudflare-ctl
+        with:
+          build-dir: ${{ steps.site.outputs.dir }}
+          cloudflare-api-token: spike-143-dummy-not-a-token
+          cloudflare-account-id: '00000000000000000000000000000000'
+          project-name: spike-143-no-such-project
+
+      - name: Assert the positive control
+        id: assert-ctl
+        if: ${{ !cancelled() }}
+        env:
+          PN_OUTCOME: ${{ steps.pn_ctl.outcome }}
+          PN_DEPLOY_URL: ${{ steps.pn_ctl.outputs.deploy-url }}
+          PN_BEFORE: ${{ steps.mkctl.outputs.preview_netlify_before }}
+          PC_OUTCOME: ${{ steps.pc_ctl.outcome }}
+          PC_DEPLOY_URL: ${{ steps.pc_ctl.outputs.deploy-url }}
+          PC_BEFORE: ${{ steps.mkctl.outputs.preview_cloudflare_before }}
+        run: bash .github/spike-143/scripts/assert-ctl.sh
+
+      - name: Assert attribution (nothing from quantecon/actions was downloaded)
+        id: attribution
+        if: ${{ !cancelled() }}
+        run: bash .github/spike-143/scripts/assert-attribution.sh local
+
+  # ==========================================================================
+  # Remote CONTROL: the same chain through the literal SHA
+  # ==========================================================================
+  q1-remote:
+    name: 'q1-remote: canary CI chain via quantecon/actions@SHA in a container'
+    needs: resolve
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: read          # pull the container image
+    container:
+      image: ${{ needs.resolve.outputs.image }}
+    outputs:
+      builds_ok: ${{ steps.assert-builds.outputs.ok }}
+      html_pages: ${{ steps.assert-builds.outputs.html_pages }}
+      html_list_sha: ${{ steps.assert-builds.outputs.html_list_sha }}
+      cache_key: ${{ steps.cache.outputs.cache-key }}
+      q2_ok: ${{ steps.assert-q2.outputs.ok }}
+      attribution_ok: ${{ steps.attribution.outputs.ok }}
+    steps:
+      - name: Checkout canary (workspace root; before the control checkout)
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Used only to compare against what the runner downloads, and for the
+      # CLI pins. Checked out at the CONTROL SHA, not the candidate.
+      - name: Checkout QuantEcon/actions at the control SHA into ./actions-repo
+        uses: actions/checkout@v7
+        with:
+          repository: QuantEcon/actions
+          ref: ${{ env.CONTROL_SHA }}
+          path: actions-repo
+          persist-credentials: false
+
+      - name: Verify checkouts
+        env:
+          IMAGE: ${{ needs.resolve.outputs.image }}
+          JOB_LABEL: q1-remote
+        run: bash .github/spike-143/scripts/check-candidate.sh "$CONTROL_SHA" restore-jupyter-cache build-lectures preview-netlify preview-cloudflare
+
+      - name: Restore build cache (remote)
+        id: cache
+        uses: quantecon/actions/restore-jupyter-cache@c0ac11130e1dd3dd7e1cca07ef26b5781947186b
+        with:
+          cache-type: 'build'
+          source-dir: 'lectures'
+          save-cache: 'true'
+
+      - name: Clear restored build outputs
+        env:
+          MATCHED: ${{ steps.cache.outputs.cache-key }}
+        run: |
+          echo "Restored cache: ${MATCHED:-none (cold build)}"
+          for d in html latex jupyter; do
+            if [ -e "_build/$d" ]; then echo "removing restored _build/$d"; rm -rf "_build/$d"; fi
+          done
+          ls -la _build 2>/dev/null || echo "(no _build yet)"
+          mkdir -p "$RUNNER_TEMP/spike-143"
+          touch "$RUNNER_TEMP/spike-143/before-builds"
+          echo "Restored cache \`${MATCHED:-none}\`; _build/{html,latex,jupyter} removed before building." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build PDF (remote)
+        id: build-pdf
+        uses: quantecon/actions/build-lectures@c0ac11130e1dd3dd7e1cca07ef26b5781947186b
+        with:
+          source-dir: 'lectures'
+          builder: 'pdflatex'
+          upload-failure-reports: true
+          failure-artifact-name: spike143-q1-remote-pdflatex
+
+      - name: Build Notebooks (remote)
+        id: build-nb
+        uses: quantecon/actions/build-lectures@c0ac11130e1dd3dd7e1cca07ef26b5781947186b
+        with:
+          source-dir: 'lectures'
+          builder: 'jupyter'
+          upload-failure-reports: true
+          failure-artifact-name: spike143-q1-remote-jupyter
+
+      - name: Build HTML (remote)
+        id: build
+        uses: quantecon/actions/build-lectures@c0ac11130e1dd3dd7e1cca07ef26b5781947186b
+        with:
+          source-dir: 'lectures'
+          builder: 'html'
+          html-copy-pdf: true
+          html-copy-notebooks: true
+          upload-failure-reports: true
+          failure-artifact-name: spike143-q1-remote-html
+
+      - name: Assert build outputs
+        id: assert-builds
+        if: ${{ !cancelled() }}
+        env:
+          LABEL: q1-remote
+          PDF_PATH: ${{ steps.build-pdf.outputs.build-path }}
+          NB_PATH: ${{ steps.build-nb.outputs.build-path }}
+          HTML_PATH: ${{ steps.build.outputs.build-path }}
+        run: bash .github/spike-143/scripts/assert-build.sh
+
+      - name: Write the run marker into the site
+        id: site
+        if: ${{ !cancelled() }}
+        env:
+          HTML_PATH: ${{ steps.build.outputs.build-path }}
+        run: |
+          SITE="${HTML_PATH:-./_build/html}"
+          mkdir -p "$SITE"
+          printf 'spike-143 run=%s.%s event=%s control=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_EVENT_NAME" "$CONTROL_SHA" > "$SITE/spike-143-marker.txt"
+          echo "dir=$SITE" >> "$GITHUB_OUTPUT"
+
+      - name: Preview Netlify (remote, dummy token)
+        id: pn_remote
+        if: ${{ !cancelled() && steps.site.outcome == 'success' }}
+        uses: quantecon/actions/preview-netlify@c0ac11130e1dd3dd7e1cca07ef26b5781947186b
+        with:
+          build-dir: ${{ steps.site.outputs.dir }}
+          netlify-auth-token: spike-143-dummy-not-a-token
+          netlify-site-id: 00000000-0000-0000-0000-000000000000
+
+      - name: Preview Cloudflare (remote, dummy token)
+        id: pc_remote
+        if: ${{ !cancelled() && steps.site.outcome == 'success' }}
+        uses: quantecon/actions/preview-cloudflare@c0ac11130e1dd3dd7e1cca07ef26b5781947186b
+        with:
+          build-dir: ${{ steps.site.outputs.dir }}
+          cloudflare-api-token: spike-143-dummy-not-a-token
+          cloudflare-account-id: '00000000000000000000000000000000'
+          project-name: spike-143-no-such-project
+
+      - name: Assert Q2 (green, deployed nothing, CLI installed through GITHUB_ACTION_PATH)
+        id: assert-q2
+        if: ${{ !cancelled() }}
+        env:
+          EVENT: ${{ github.event_name }}
+          EXPECT_DIRS: '1'
+          ACTIONS_SRC: actions-repo
+          PN_OUTCOME: ${{ steps.pn_remote.outcome }}
+          PN_DEPLOY_URL: ${{ steps.pn_remote.outputs.deploy-url }}
+          PN_CHANGED: ${{ steps.pn_remote.outputs.changed-files }}
+          PC_OUTCOME: ${{ steps.pc_remote.outcome }}
+          PC_DEPLOY_URL: ${{ steps.pc_remote.outputs.deploy-url }}
+          PC_DEPLOYMENT_URL: ${{ steps.pc_remote.outputs.deployment-url }}
+          PC_CHANGED: ${{ steps.pc_remote.outputs.changed-files }}
+        run: bash .github/spike-143/scripts/assert-preview-skipped.sh "q1-remote via quantecon/actions@SHA"
+
+      - name: Assert attribution (only quantecon/actions@CONTROL_SHA was downloaded)
+        id: attribution
+        if: ${{ !cancelled() }}
+        run: bash .github/spike-143/scripts/assert-attribution.sh remote "$CONTROL_SHA"
+
+  # ==========================================================================
+  # build-jupyter-cache through a local path: as shipped, and rewired
+  # ==========================================================================
+  bjc-local:
+    name: 'bjc-local: ./actions-repo/build-jupyter-cache as shipped (nested @v0)'
+    needs: resolve
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: read          # pull the container image. Deliberately no issues: write.
+    container:
+      image: ${{ needs.resolve.outputs.image }}
+    outputs:
+      ok: ${{ steps.assert.outputs.ok }}
+      v0_sha: ${{ steps.attribution.outputs.v0_sha }}
+      attribution_ok: ${{ steps.attribution.outputs.ok }}
+    steps:
+      - name: Checkout canary (workspace root, full history as cache.yml)
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout candidate QuantEcon/actions into ./actions-repo
+        uses: actions/checkout@v7
+        with:
+          repository: QuantEcon/actions
+          ref: ${{ needs.resolve.outputs.candidate }}
+          path: actions-repo
+          persist-credentials: false
+
+      - name: Verify checkouts
+        env:
+          IMAGE: ${{ needs.resolve.outputs.image }}
+          JOB_LABEL: bjc-local
+          CANDIDATE: ${{ needs.resolve.outputs.candidate }}
+        run: bash .github/spike-143/scripts/check-candidate.sh "$CANDIDATE" build-jupyter-cache setup-environment build-lectures
+
+      - name: Build and cache (local build-jupyter-cache, nested calls as shipped)
+        id: bjc
+        uses: ./actions-repo/build-jupyter-cache
+        with:
+          builders: 'html'
+          source-dir: 'lectures'
+          create-issue-on-failure: 'false'
+          upload-artifact: 'false'
+
+      - name: Assert build-jupyter-cache outputs
+        id: assert
+        if: ${{ !cancelled() }}
+        env:
+          BUILD_SUCCESS: ${{ steps.bjc.outputs.build-success }}
+          HTML_STATUS: ${{ steps.bjc.outputs.html-status }}
+          JUPYTER_STATUS: ${{ steps.bjc.outputs.jupyter-status }}
+          PDFLATEX_STATUS: ${{ steps.bjc.outputs.pdflatex-status }}
+          CACHE_KEY: ${{ steps.bjc.outputs.cache-key }}
+          ISSUE_URL: ${{ steps.bjc.outputs.failure-issue-url }}
+          EXPECTED_KEY: build-${{ hashFiles('environment.yml') }}--${{ github.run_id }}
+        run: bash .github/spike-143/scripts/assert-bjc.sh bjc-local
+
+      - name: Attribution (nested siblings came from quantecon/actions@v0)
+        id: attribution
+        if: ${{ !cancelled() }}
+        run: bash .github/spike-143/scripts/assert-attribution.sh nested-v0
+
+  bjc-rewired:
+    name: 'bjc-rewired: ./actions-repo/build-jupyter-cache with nested ./actions-repo siblings'
+    needs: resolve
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: read          # pull the container image. Deliberately no issues: write.
+    container:
+      image: ${{ needs.resolve.outputs.image }}
+    outputs:
+      ok: ${{ steps.assert.outputs.ok }}
+      rewrites: ${{ steps.rewire.outputs.rewrites }}
+      attribution_ok: ${{ steps.attribution.outputs.ok }}
+    steps:
+      - name: Checkout canary (workspace root, full history as cache.yml)
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout candidate QuantEcon/actions into ./actions-repo
+        uses: actions/checkout@v7
+        with:
+          repository: QuantEcon/actions
+          ref: ${{ needs.resolve.outputs.candidate }}
+          path: actions-repo
+          persist-credentials: false
+
+      - name: Verify checkouts
+        env:
+          IMAGE: ${{ needs.resolve.outputs.image }}
+          JOB_LABEL: bjc-rewired
+          CANDIDATE: ${{ needs.resolve.outputs.candidate }}
+        run: bash .github/spike-143/scripts/check-candidate.sh "$CANDIDATE" build-jupyter-cache setup-environment build-lectures
+
+      # A nested `./` in a composite resolves against the workspace, not the
+      # action's directory (actions/runner#1348), so after this rewrite the
+      # whole chain is the candidate. The runner reads a local action.yml when
+      # its step starts, so editing it here is in time.
+      - name: Rewire the 4 nested @v0 sibling calls to ./actions-repo
+        id: rewire
+        run: |
+          set -euo pipefail
+          F=actions-repo/build-jupyter-cache/action.yml
+          before=$(grep -cE '^[[:space:]]*uses: quantecon/actions/(setup-environment|build-lectures)@v0[[:space:]]*$' "$F" || true)
+          sed -i -E 's#^([[:space:]]*)uses: quantecon/actions/(setup-environment|build-lectures)@v0[[:space:]]*$#\1uses: ./actions-repo/\2#' "$F"
+          after=$(grep -cE '^[[:space:]]*uses: \./actions-repo/(setup-environment|build-lectures)$' "$F" || true)
+          left=$(grep -ciE 'uses:[[:space:]]*quantecon/actions/' "$F" || true)
+          git -c safe.directory='*' -C actions-repo --no-pager diff
+          [ "$before" = 4 ] || { echo "::error::expected 4 nested quantecon/actions/*@v0 uses: lines in $F, found $before"; exit 1; }
+          [ "$after" = 4 ] || { echo "::error::expected 4 rewritten ./actions-repo uses: lines, found $after"; exit 1; }
+          [ "$left" = 0 ] || { echo "::error::$left quantecon/actions/ uses: line(s) remain in $F"; exit 1; }
+          echo "rewrites=$after" >> "$GITHUB_OUTPUT"
+
+      - name: Build and cache (local build-jupyter-cache, nested calls rewired)
+        id: bjc
+        uses: ./actions-repo/build-jupyter-cache
+        with:
+          builders: 'html'
+          source-dir: 'lectures'
+          create-issue-on-failure: 'false'
+          upload-artifact: 'false'
+          # bjc-local already owns the default execution-reports-html name.
+          upload-failure-reports: 'false'
+
+      - name: Assert build-jupyter-cache outputs
+        id: assert
+        if: ${{ !cancelled() }}
+        env:
+          BUILD_SUCCESS: ${{ steps.bjc.outputs.build-success }}
+          HTML_STATUS: ${{ steps.bjc.outputs.html-status }}
+          JUPYTER_STATUS: ${{ steps.bjc.outputs.jupyter-status }}
+          PDFLATEX_STATUS: ${{ steps.bjc.outputs.pdflatex-status }}
+          CACHE_KEY: ${{ steps.bjc.outputs.cache-key }}
+          ISSUE_URL: ${{ steps.bjc.outputs.failure-issue-url }}
+          EXPECTED_KEY: build-${{ hashFiles('environment.yml') }}--${{ github.run_id }}
+        run: bash .github/spike-143/scripts/assert-bjc.sh bjc-rewired
+
+      - name: Attribution (nothing from quantecon/actions was downloaded)
+        id: attribution
+        if: ${{ !cancelled() }}
+        run: bash .github/spike-143/scripts/assert-attribution.sh local
+
+  # ==========================================================================
+  # Draft-PR run: real preview deploys through the LOCAL path
+  # ==========================================================================
+  pr-preview:
+    name: 'pr-preview: CI chain via ./actions-repo with real preview deploys'
+    needs: resolve
+    if: >-
+      github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && github.head_ref == 'spike/143-local-uses'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read          # pull the container image
+      pull-requests: write    # the preview actions' PR comments
+    container:
+      image: ${{ needs.resolve.outputs.image }}
+    outputs:
+      builds_ok: ${{ steps.assert-builds.outputs.ok }}
+      attribution_ok: ${{ steps.attribution.outputs.ok }}
+      netlify_ok: ${{ steps.assert-netlify.outputs.ok }}
+      netlify_url: ${{ steps.pn_pr.outputs.deploy-url }}
+      cloudflare_ran: ${{ steps.cf.outputs.present }}
+      cloudflare_ok: ${{ steps.assert-cloudflare.outputs.ok }}
+      cloudflare_url: ${{ steps.pc_pr.outputs.deploy-url }}
+      comments_ok: ${{ steps.comments.outputs.ok }}
+    steps:
+      - name: Checkout canary (workspace root; before the candidate checkout)
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Checkout candidate QuantEcon/actions into ./actions-repo
+        uses: actions/checkout@v7
+        with:
+          repository: QuantEcon/actions
+          ref: ${{ needs.resolve.outputs.candidate }}
+          path: actions-repo
+          persist-credentials: false
+
+      - name: Verify checkouts
+        id: verify
+        env:
+          IMAGE: ${{ needs.resolve.outputs.image }}
+          JOB_LABEL: pr-preview
+          CANDIDATE: ${{ needs.resolve.outputs.candidate }}
+        run: bash .github/spike-143/scripts/check-candidate.sh "$CANDIDATE" restore-jupyter-cache build-lectures preview-netlify preview-cloudflare
+
+      - name: Restore build cache (local)
+        id: cache
+        uses: ./actions-repo/restore-jupyter-cache
+        with:
+          cache-type: 'build'
+          source-dir: 'lectures'
+          save-cache: 'true'
+
+      - name: Clear restored build outputs
+        env:
+          MATCHED: ${{ steps.cache.outputs.cache-key }}
+        run: |
+          echo "Restored cache: ${MATCHED:-none (cold build)}"
+          for d in html latex jupyter; do
+            if [ -e "_build/$d" ]; then echo "removing restored _build/$d"; rm -rf "_build/$d"; fi
+          done
+          mkdir -p "$RUNNER_TEMP/spike-143"
+          touch "$RUNNER_TEMP/spike-143/before-builds"
+          echo "Restored cache \`${MATCHED:-none}\`; _build/{html,latex,jupyter} removed before building." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build PDF (local)
+        id: build-pdf
+        uses: ./actions-repo/build-lectures
+        with:
+          source-dir: 'lectures'
+          builder: 'pdflatex'
+          upload-failure-reports: true
+          failure-artifact-name: spike143-pr-pdflatex
+
+      - name: Build Notebooks (local)
+        id: build-nb
+        uses: ./actions-repo/build-lectures
+        with:
+          source-dir: 'lectures'
+          builder: 'jupyter'
+          upload-failure-reports: true
+          failure-artifact-name: spike143-pr-jupyter
+
+      - name: Build HTML (local)
+        id: build
+        uses: ./actions-repo/build-lectures
+        with:
+          source-dir: 'lectures'
+          builder: 'html'
+          html-copy-pdf: true
+          html-copy-notebooks: true
+          upload-failure-reports: true
+          failure-artifact-name: spike143-pr-html
+
+      - name: Assert build outputs
+        id: assert-builds
+        if: ${{ !cancelled() }}
+        env:
+          LABEL: pr-preview
+          PDF_PATH: ${{ steps.build-pdf.outputs.build-path }}
+          NB_PATH: ${{ steps.build-nb.outputs.build-path }}
+          HTML_PATH: ${{ steps.build.outputs.build-path }}
+        run: bash .github/spike-143/scripts/assert-build.sh
+
+      - name: Write the run marker into the site
+        id: site
+        if: ${{ !cancelled() }}
+        env:
+          HTML_PATH: ${{ steps.build.outputs.build-path }}
+          CANDIDATE: ${{ needs.resolve.outputs.candidate }}
+        run: |
+          SITE="${HTML_PATH:-./_build/html}"
+          mkdir -p "$SITE"
+          printf 'spike-143 run=%s.%s event=%s candidate=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_EVENT_NAME" "$CANDIDATE" > "$SITE/spike-143-marker.txt"
+          echo "dir=$SITE" >> "$GITHUB_OUTPUT"
+          echo "marker=$SITE/spike-143-marker.txt" >> "$GITHUB_OUTPUT"
+
+      # One deploy per provider per PR run, and the canary's own ci.yml job is
+      # skipped for this branch, so the pr-<N> aliases and the marker comments
+      # belong to this job alone.
+      - name: Preview Netlify (local, canary secrets)
+        id: pn_pr
+        # Real secrets: fail closed. Only a verified candidate checkout and a
+        # fully successful build chain may reach a real deploy.
+        if: ${{ !cancelled() && steps.verify.outcome == 'success' && steps.build.outcome == 'success' && steps.site.outcome == 'success' }}
+        uses: ./actions-repo/preview-netlify
+        with:
+          build-dir: ${{ steps.site.outputs.dir }}
+          netlify-auth-token: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          netlify-site-id: ${{ secrets.NETLIFY_SITE_ID }}
+
+      - name: Assert the Netlify deploy
+        id: assert-netlify
+        if: ${{ !cancelled() }}
+        env:
+          OUTCOME: ${{ steps.pn_pr.outcome }}
+          DEPLOY_URL: ${{ steps.pn_pr.outputs.deploy-url }}
+          CHANGED_FILES: ${{ steps.pn_pr.outputs.changed-files }}
+          PR: ${{ github.event.pull_request.number }}
+          EXPECTED_CHANGED: lectures/spike_143_marker.md
+          MARKER_FILE: ${{ steps.site.outputs.marker }}
+        run: bash .github/spike-143/scripts/assert-preview-deployed.sh netlify
+
+      # The canary's org secrets CLOUDFLARE_PAGES_TOKEN / CLOUDFLARE_QE_ACCOUNT_ID
+      # deployed canary PR #67 to qe-preview-canary. If they do not reach this
+      # run the Cloudflare leg is NOT exercised, and that is reported as a
+      # failure rather than skipped quietly.
+      - name: Check the Cloudflare secrets reach this run
+        id: cf
+        if: ${{ !cancelled() }}
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
+          CF_ACCOUNT: ${{ secrets.CLOUDFLARE_QE_ACCOUNT_ID }}
+        run: |
+          if [ -n "$CF_TOKEN" ] && [ -n "$CF_ACCOUNT" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::error::CLOUDFLARE_PAGES_TOKEN and/or CLOUDFLARE_QE_ACCOUNT_ID are empty in this run, so the Cloudflare PR leg is NOT exercised"
+          fi
+
+      - name: Preview Cloudflare (local, canary secrets)
+        id: pc_pr
+        if: ${{ !cancelled() && steps.verify.outcome == 'success' && steps.build.outcome == 'success' && steps.site.outcome == 'success' && steps.cf.outputs.present == 'true' }}
+        uses: ./actions-repo/preview-cloudflare
+        with:
+          build-dir: ${{ steps.site.outputs.dir }}
+          cloudflare-api-token: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
+          cloudflare-account-id: ${{ secrets.CLOUDFLARE_QE_ACCOUNT_ID }}
+          project-name: qe-preview-canary
+
+      - name: Assert the Cloudflare deploy
+        id: assert-cloudflare
+        if: ${{ !cancelled() }}
+        env:
+          PRESENT: ${{ steps.cf.outputs.present }}
+          OUTCOME: ${{ steps.pc_pr.outcome }}
+          DEPLOY_URL: ${{ steps.pc_pr.outputs.deploy-url }}
+          CHANGED_FILES: ${{ steps.pc_pr.outputs.changed-files }}
+          PR: ${{ github.event.pull_request.number }}
+          EXPECTED_CHANGED: lectures/spike_143_marker.md
+          MARKER_FILE: ${{ steps.site.outputs.marker }}
+        run: |
+          if [ "$PRESENT" != "true" ]; then
+            echo "::error::Cloudflare PR leg NOT EXERCISED: its secrets were empty in this run"
+            echo "### PR preview via ./actions-repo/preview-cloudflare: NOT EXERCISED (secrets empty)" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          bash .github/spike-143/scripts/assert-preview-deployed.sh cloudflare
+
+      - name: Assert the preview comments were written by this run
+        id: comments
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          MARKERS: ${{ steps.cf.outputs.present == 'true' && 'Netlify Preview Ready!|Cloudflare Preview Ready!' || 'Netlify Preview Ready!' }}
+        run: |
+          python3 .github/spike-143/scripts/assert-pr-comments.py
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
+      - name: Assert attribution (nothing from quantecon/actions was downloaded)
+        id: attribution
+        if: ${{ !cancelled() }}
+        run: bash .github/spike-143/scripts/assert-attribution.sh local
+
+  # ==========================================================================
+  # Evidence and verdict
+  # ==========================================================================
+  evidence:
+    name: 'evidence: logs, markers, verdict'
+    needs: [resolve, probe-container, probe-host, q1-local, q1-remote, bjc-local, bjc-rewired, pr-preview]
+    # !cancelled(), not always(): it still runs when upstream jobs fail (the
+    # verdict needs that), but a run superseded by a newer push stops here.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.head_ref == 'spike/143-local-uses') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read           # list this run's jobs and download their logs
+    steps:
+      - name: Checkout the spike scripts
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github/spike-143
+          persist-credentials: false
+
+      - name: Check logs and write the verdict
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          EVENT: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE: ${{ needs.resolve.outputs.candidate }}
+          OUT: spike-143-evidence
+        run: bash .github/spike-143/scripts/evidence.sh
+
+      - name: Keep the logs and verdict (job logs expire)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: spike-143-evidence-${{ github.event_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: spike-143-evidence
+          retention-days: 90
+          if-no-files-found: error

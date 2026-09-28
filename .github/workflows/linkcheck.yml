@@ -7,6 +7,10 @@ on:
 jobs:
   link-checking:
     name: Link Checking
+    # SPIKE BRANCH ONLY (QuantEcon/actions#143): never merge spike/143-local-uses.
+    # A dispatch at this branch would file a Link Checker Report issue
+    # (issues: write); skip it here. Harmless elsewhere.
+    if: github.ref_name != 'spike/143-local-uses'
     runs-on: "ubuntu-latest"
     permissions:
       issues: write # required for peter-evans/create-issue-from-file

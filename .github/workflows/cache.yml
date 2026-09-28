@@ -10,6 +10,10 @@ concurrency:
 
 jobs:
   build-cache:
+    # SPIKE BRANCH ONLY (QuantEcon/actions#143): never merge spike/143-local-uses.
+    # A dispatch at this branch would run build-jupyter-cache@v0 with
+    # create-issue-on-failure and issues: write; skip it here. Harmless elsewhere.
+    if: github.ref_name != 'spike/143-local-uses'
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/quantecon/quantecon-build:latest

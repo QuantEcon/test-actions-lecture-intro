@@ -1,0 +1,68 @@
+# THROWAWAY: QuantEcon/actions#143 spike, branch spike/143-local-uses only.
+name: 'Spike 143 path probe'
+description: >-
+  Reports, from inside whatever environment the step runs in, whether this
+  action's directory is reachable through three routes, and whether a bash
+  file OUTSIDE the directory (the way preview-* and deploy-cloudflare reach
+  ../scripts) is reachable through each route. Route 1 is the github.action_path
+  expression expanded into the script text, the shape that broke in #83.
+  Route 2 is the same expression delivered through a step env entry. Route 3
+  is the GITHUB_ACTION_PATH environment variable. It only observes and never
+  fails on what it finds; the calling workflow asserts.
+inputs:
+  sibling:
+    description: 'A bash file outside this directory, as a path relative to it (e.g. ../scripts/x.sh). Parsed with bash -n, never executed.'
+    required: true
+outputs:
+  report:
+    description: 'One line of |-separated key=value pairs: where, uid, workspace, action_repository, action_ref, and <route>_path/_dir/_rc for routes inline, envexpr, envvar.'
+    value: ${{ steps.probe.outputs.report }}
+runs:
+  using: composite
+  steps:
+    - id: probe
+      shell: bash
+      env:
+        # Route 2. The container step host rewrites every env value that starts
+        # with a host path the job container mounts (/home/runner/work -> /__w)
+        # before `docker exec`, so this route is expected to work where route 1
+        # does not. That is also why route 1 must NOT be passed through env:
+        # here: doing so would hide the #83 behaviour this probe exists to show.
+        ENVEXPR_PATH: ${{ github.action_path }}
+        SIBLING: ${{ inputs.sibling }}
+      run: |
+        # Route 1: expanded by the runner into this script's text before bash
+        # runs it. Nothing translates it. This is how #83 broke (exit 127).
+        INLINE_PATH='${{ github.action_path }}'
+        # Route 3: the variable the runner exports for the step.
+        ENVVAR_PATH="${GITHUB_ACTION_PATH:-}"
+
+        where=host
+        if [ -f /.dockerenv ] || [ -f /run/.containerenv ]; then where=container; fi
+
+        report="where=$where|uid=$(id -u)|workspace=${GITHUB_WORKSPACE:-}|action_repository=${GITHUB_ACTION_REPOSITORY:-}|action_ref=${GITHUB_ACTION_REF:-}"
+        for route in inline envexpr envvar; do
+          case "$route" in
+            inline)  p="$INLINE_PATH" ;;
+            envexpr) p="$ENVEXPR_PATH" ;;
+            envvar)  p="$ENVVAR_PATH" ;;
+          esac
+          err="${RUNNER_TEMP:-/tmp}/spike-143-probe-$route.err"
+          : > "$err"
+          if [ -z "$p" ]; then
+            dir=empty
+            rc=empty
+          else
+            if [ -d "$p" ]; then dir=yes; else dir=no; fi
+            # bash -n parses without executing. A missing file exits 127, the
+            # status #83's `bash <path>/scripts/...` produced.
+            set +e
+            bash -n "$p/$SIBLING" 2>"$err"
+            rc=$?
+            set -e
+          fi
+          printf '%-8s path=[%s]\n         dir=%s  sibling rc=%s %s\n' "$route" "$p" "$dir" "$rc" "$(head -n 1 "$err")"
+          report="$report|${route}_path=$p|${route}_dir=$dir|${route}_rc=$rc"
+        done
+        echo "where=$where  GITHUB_ACTION_REPOSITORY=[${GITHUB_ACTION_REPOSITORY:-}]  GITHUB_ACTION_REF=[${GITHUB_ACTION_REF:-}]"
+        echo "report=$report" >> "$GITHUB_OUTPUT"

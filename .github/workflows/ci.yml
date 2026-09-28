@@ -5,6 +5,12 @@ on:
 
 jobs:
   preview:
+    # SPIKE BRANCH ONLY (QuantEcon/actions#143): never merge spike/143-local-uses.
+    # The spike's own workflow deploys this branch's draft-PR preview through a
+    # local ./actions-repo path; this @v0 job would deploy to the same pr-<N>
+    # alias and rewrite the same marker comment, so it is skipped for the spike
+    # branch (as a PR head, and if ever dispatched at it). Harmless elsewhere.
+    if: github.head_ref != 'spike/143-local-uses' && github.ref_name != 'spike/143-local-uses'
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/quantecon/quantecon-build:latest
