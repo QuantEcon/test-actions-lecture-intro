@@ -2,18 +2,22 @@
 #
 # Exercises setup-environment's standard-mode Conda cache on this repository's
 # own environment.yml, the full Anaconda stack production lecture-python-intro
-# builds with, at the commit that fixed cache-version (QuantEcon/actions#206).
-# The rest of this repository runs setup-environment only in container mode,
-# where there is no Conda cache.
+# builds with. The first run, at the commit that fixed cache-version
+# (QuantEcon/actions#206), found QuantEcon/actions#209: a restore mixed the
+# cache with the environment setup-miniconda had just created. This run is at
+# the #209 fix (QuantEcon/actions#210), and checks that every restore holds a
+# single, working pip. The rest of this repository runs setup-environment only
+# in container mode, where there is no Conda cache.
 #
 # Every job salts environment.yml with the run id and attempt, so each run's
 # cache keys are its own and every assertion is deterministic:
 #   seed  builds the environment and saves it;
-#   hit   the same file and version must restore it exactly, and it must build
-#         the lectures;
+#   hit   the same file and version must restore it exactly, with one working
+#         pip, and it must build the lectures;
 #   bump  a new cache-version must restore nothing: a fresh build;
 #   edit  one more line in the file, same version, must restore seed's
-#         environment through the restore-keys fallback.
+#         environment through the restore-keys fallback and update it, with
+#         one working pip.
 name: cache-version experiment (actions#205)
 
 on:
@@ -41,7 +45,7 @@ jobs:
 
       - name: Setup environment
         id: setup
-        uses: quantecon/actions/setup-environment@560053c3362019cfd0a5cfc6122c05b574039ebf
+        uses: quantecon/actions/setup-environment@c64c53215f34409905d46d056400609cfa25a81d
 
       - name: Assert no exact hit
         env:
@@ -66,17 +70,26 @@ jobs:
 
       - name: Setup environment
         id: setup
-        uses: quantecon/actions/setup-environment@560053c3362019cfd0a5cfc6122c05b574039ebf
+        uses: quantecon/actions/setup-environment@c64c53215f34409905d46d056400609cfa25a81d
 
-      - name: Assert an exact hit
+      - name: Assert an exact hit, with one working pip
         env:
           CONDA_CACHE_HIT: ${{ steps.setup.outputs.conda-cache-hit }}
         run: |
           echo "conda-cache-hit=[$CONDA_CACHE_HIT]"
           [ "$CONDA_CACHE_HIT" = "true" ] || { echo "::error::expected an exact hit on seed's cache, got [$CONDA_CACHE_HIT]"; exit 1; }
+          shopt -s nullglob
+          records=("$CONDA"/envs/quantecon/conda-meta/pip-[0-9]*.json)
+          if [ "${#records[@]}" -ne 1 ]; then
+            echo "::error::conda-meta holds ${#records[@]} pip records: the restore mixed the cache with a fresh environment (QuantEcon/actions#209)"
+            printf '  %s\n' "${records[@]##*/}"
+            exit 1
+          fi
+          "$CONDA/envs/quantecon/bin/python" -m pip --version \
+            || { echo "::error::pip does not run in the restored environment (QuantEcon/actions#209)"; exit 1; }
 
       - name: Build the lectures on the restored environment
-        uses: quantecon/actions/build-lectures@560053c3362019cfd0a5cfc6122c05b574039ebf
+        uses: quantecon/actions/build-lectures@c64c53215f34409905d46d056400609cfa25a81d
         with:
           source-dir: 'lectures'
           builder: 'html'
@@ -95,7 +108,7 @@ jobs:
 
       - name: Setup environment under a new cache-version
         id: setup
-        uses: quantecon/actions/setup-environment@560053c3362019cfd0a5cfc6122c05b574039ebf
+        uses: quantecon/actions/setup-environment@c64c53215f34409905d46d056400609cfa25a81d
         with:
           cache-version: bump-${{ env.SALT }}
 
@@ -121,11 +134,20 @@ jobs:
 
       - name: Setup environment
         id: setup
-        uses: quantecon/actions/setup-environment@560053c3362019cfd0a5cfc6122c05b574039ebf
+        uses: quantecon/actions/setup-environment@c64c53215f34409905d46d056400609cfa25a81d
 
-      - name: Assert the fallback restored seed's environment
+      - name: Assert the fallback restored and updated seed's environment, with one working pip
         env:
           CONDA_CACHE_HIT: ${{ steps.setup.outputs.conda-cache-hit }}
         run: |
           echo "conda-cache-hit=[$CONDA_CACHE_HIT]"
           [ "$CONDA_CACHE_HIT" = "false" ] || { echo "::error::expected a fallback restore ('false') for an edited file under the same version, got [$CONDA_CACHE_HIT]"; exit 1; }
+          shopt -s nullglob
+          records=("$CONDA"/envs/quantecon/conda-meta/pip-[0-9]*.json)
+          if [ "${#records[@]}" -ne 1 ]; then
+            echo "::error::conda-meta holds ${#records[@]} pip records: the restore mixed the cache with a fresh environment (QuantEcon/actions#209)"
+            printf '  %s\n' "${records[@]##*/}"
+            exit 1
+          fi
+          "$CONDA/envs/quantecon/bin/python" -m pip --version \
+            || { echo "::error::pip does not run in the restored environment (QuantEcon/actions#209)"; exit 1; }
