@@ -1,0 +1,131 @@
+# One-off experiment for QuantEcon/actions#205. Not for merging.
+#
+# Exercises setup-environment's standard-mode Conda cache on this repository's
+# own environment.yml, the full Anaconda stack production lecture-python-intro
+# builds with, at the commit that fixed cache-version (QuantEcon/actions#206).
+# The rest of this repository runs setup-environment only in container mode,
+# where there is no Conda cache.
+#
+# Every job salts environment.yml with the run id and attempt, so each run's
+# cache keys are its own and every assertion is deterministic:
+#   seed  builds the environment and saves it;
+#   hit   the same file and version must restore it exactly, and it must build
+#         the lectures;
+#   bump  a new cache-version must restore nothing: a fresh build;
+#   edit  one more line in the file, same version, must restore seed's
+#         environment through the restore-keys fallback.
+name: cache-version experiment (actions#205)
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/cache-version-experiment.yml'
+
+permissions:
+  contents: read
+
+env:
+  SALT: ${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  seed:
+    name: 'seed: build and save the environment'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Salt environment.yml
+        run: |
+          printf '\n# cache-version experiment: %s\n' "$SALT" >> environment.yml
+
+      - name: Setup environment
+        id: setup
+        uses: quantecon/actions/setup-environment@560053c3362019cfd0a5cfc6122c05b574039ebf
+
+      - name: Assert no exact hit
+        env:
+          CONDA_CACHE_HIT: ${{ steps.setup.outputs.conda-cache-hit }}
+        run: |
+          echo "conda-cache-hit=[$CONDA_CACHE_HIT]"
+          [ "$CONDA_CACHE_HIT" != "true" ] || { echo "::error::an exact hit on a salted environment file"; exit 1; }
+
+  hit:
+    name: 'hit: the same file and version restore exactly, and build the lectures'
+    needs: seed
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # build-lectures dates each page from git history
+
+      - name: Salt environment.yml as seed did
+        run: |
+          printf '\n# cache-version experiment: %s\n' "$SALT" >> environment.yml
+
+      - name: Setup environment
+        id: setup
+        uses: quantecon/actions/setup-environment@560053c3362019cfd0a5cfc6122c05b574039ebf
+
+      - name: Assert an exact hit
+        env:
+          CONDA_CACHE_HIT: ${{ steps.setup.outputs.conda-cache-hit }}
+        run: |
+          echo "conda-cache-hit=[$CONDA_CACHE_HIT]"
+          [ "$CONDA_CACHE_HIT" = "true" ] || { echo "::error::expected an exact hit on seed's cache, got [$CONDA_CACHE_HIT]"; exit 1; }
+
+      - name: Build the lectures on the restored environment
+        uses: quantecon/actions/build-lectures@560053c3362019cfd0a5cfc6122c05b574039ebf
+        with:
+          source-dir: 'lectures'
+          builder: 'html'
+
+  bump:
+    name: 'bump: a new cache-version restores nothing'
+    needs: seed
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Salt environment.yml as seed did
+        run: |
+          printf '\n# cache-version experiment: %s\n' "$SALT" >> environment.yml
+
+      - name: Setup environment under a new cache-version
+        id: setup
+        uses: quantecon/actions/setup-environment@560053c3362019cfd0a5cfc6122c05b574039ebf
+        with:
+          cache-version: bump-${{ env.SALT }}
+
+      - name: Assert nothing was restored
+        env:
+          CONDA_CACHE_HIT: ${{ steps.setup.outputs.conda-cache-hit }}
+        run: |
+          echo "conda-cache-hit=[$CONDA_CACHE_HIT]"
+          [ -z "$CONDA_CACHE_HIT" ] || { echo "::error::expected nothing restored after a cache-version bump, got [$CONDA_CACHE_HIT]"; exit 1; }
+
+  edit:
+    name: 'edit: an edited file under the same version restores through the fallback'
+    needs: seed
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Salt environment.yml as seed did, then edit it
+        run: |
+          printf '\n# cache-version experiment: %s\n' "$SALT" >> environment.yml
+          printf '# edited: %s\n' "$SALT" >> environment.yml
+
+      - name: Setup environment
+        id: setup
+        uses: quantecon/actions/setup-environment@560053c3362019cfd0a5cfc6122c05b574039ebf
+
+      - name: Assert the fallback restored seed's environment
+        env:
+          CONDA_CACHE_HIT: ${{ steps.setup.outputs.conda-cache-hit }}
+        run: |
+          echo "conda-cache-hit=[$CONDA_CACHE_HIT]"
+          [ "$CONDA_CACHE_HIT" = "false" ] || { echo "::error::expected a fallback restore ('false') for an edited file under the same version, got [$CONDA_CACHE_HIT]"; exit 1; }
