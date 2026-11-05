@@ -10,7 +10,7 @@ env:
   PDF_CHECK: 'true'
   # Whether a workflow_dispatch run should deploy, which it does only with
   # dispatch-alias set on both preview steps. A pull_request run always should.
-  DISPATCH_DEPLOYS: 'false'
+  DISPATCH_DEPLOYS: 'true'
 
 jobs:
   preview:
@@ -74,6 +74,7 @@ jobs:
           cloudflare-api-token: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
           cloudflare-account-id: ${{ secrets.CLOUDFLARE_QE_ACCOUNT_ID }}
           project-name: qe-preview-canary
+          dispatch-alias: dispatch-canary
       
       - name: Deploy to Netlify
         id: netlify
@@ -82,6 +83,7 @@ jobs:
           build-dir: ${{ steps.build.outputs.build-path }}
           netlify-auth-token: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           netlify-site-id: ${{ secrets.NETLIFY_SITE_ID }}
+          dispatch-alias: dispatch-canary
       
       - name: Check deployed
         env:
