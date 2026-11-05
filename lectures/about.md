@@ -75,3 +75,4 @@ We also thank Noritaka Kudoh for encouraging us to start this project and provid
 
 
 % Staged check of QuantEcon/actions v0.15.0 (#253): a comment line, so the preview comment lists a changed lecture.
+% Step 3: found by the marker.
