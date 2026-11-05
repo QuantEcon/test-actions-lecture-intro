@@ -73,3 +73,5 @@ In particular, we sincerely thank and give credit to
 
 We also thank Noritaka Kudoh for encouraging us to start this project and providing thoughtful suggestions.
 
+
+% Staged check of QuantEcon/actions v0.15.0 (#258): a comment line, so the placeholder lists a changed lecture.
