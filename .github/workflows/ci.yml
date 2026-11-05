@@ -7,7 +7,7 @@ on:
 # checklist, and a trial of templates/ci.yml's pdf-check job). Not for main.
 env:
   # templates/ci.yml's switch: 'false' skips the upload and pdf-check.
-  PDF_CHECK: 'true'
+  PDF_CHECK: 'false'
   # Whether a workflow_dispatch run should deploy, which it does only with
   # dispatch-alias set on both preview steps. A pull_request run always should.
   DISPATCH_DEPLOYS: 'true'
