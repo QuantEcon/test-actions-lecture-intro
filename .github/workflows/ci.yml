@@ -3,6 +3,15 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Staged check of quantecon/actions v0.14.0 (QuantEcon/actions PR 240's
+# checklist, and a trial of templates/ci.yml's pdf-check job). Not for main.
+env:
+  # templates/ci.yml's switch: 'false' skips the upload and pdf-check.
+  PDF_CHECK: 'true'
+  # Whether a workflow_dispatch run should deploy, which it does only with
+  # dispatch-alias set on both preview steps. A pull_request run always should.
+  DISPATCH_DEPLOYS: 'false'
+
 jobs:
   preview:
     runs-on: ubuntu-latest
@@ -14,27 +23,31 @@ jobs:
       packages: read
       pull-requests: write
     
+    # Tells pdf-check whether to run (job-level if: cannot read env).
+    outputs:
+      pdf-check: ${{ env.PDF_CHECK }}
+    
     steps:
       - name: Checkout
         uses: actions/checkout@v7
       
       - name: Restore Build Cache
         id: cache
-        uses: quantecon/actions/restore-jupyter-cache@v0
+        uses: quantecon/actions/restore-jupyter-cache@v0.14.0
         with:
           cache-type: 'build'
           source-dir: 'lectures'
           save-cache: 'true'
       
       - name: Build PDF
-        uses: quantecon/actions/build-lectures@v0
+        uses: quantecon/actions/build-lectures@v0.14.0
         with:
           source-dir: 'lectures'
           builder: 'pdflatex'
           upload-failure-reports: true
       
       - name: Build Notebooks
-        uses: quantecon/actions/build-lectures@v0
+        uses: quantecon/actions/build-lectures@v0.14.0
         with:
           source-dir: 'lectures'
           builder: 'jupyter'
@@ -42,7 +55,7 @@ jobs:
       
       - name: Build HTML
         id: build
-        uses: quantecon/actions/build-lectures@v0
+        uses: quantecon/actions/build-lectures@v0.14.0
         with:
           source-dir: 'lectures'
           builder: 'html'
@@ -54,7 +67,8 @@ jobs:
       # release staged here (QuantEcon/actions CONTRIBUTING.md, Staged Releases)
       # exercises both preview providers. Project: qe-preview-canary.
       - name: Deploy to Cloudflare Pages
-        uses: quantecon/actions/preview-cloudflare@v0
+        id: cloudflare
+        uses: quantecon/actions/preview-cloudflare@v0.14.0
         with:
           build-dir: ${{ steps.build.outputs.build-path }}
           cloudflare-api-token: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
@@ -62,8 +76,70 @@ jobs:
           project-name: qe-preview-canary
       
       - name: Deploy to Netlify
-        uses: quantecon/actions/preview-netlify@v0
+        id: netlify
+        uses: quantecon/actions/preview-netlify@v0.14.0
         with:
           build-dir: ${{ steps.build.outputs.build-path }}
           netlify-auth-token: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           netlify-site-id: ${{ secrets.NETLIFY_SITE_ID }}
+      
+      - name: Check deployed
+        env:
+          CLOUDFLARE: ${{ steps.cloudflare.outputs.deployed }}
+          NETLIFY: ${{ steps.netlify.outputs.deployed }}
+          EXPECTED: ${{ github.event_name == 'pull_request' && 'true' || env.DISPATCH_DEPLOYS }}
+        run: |
+          echo "deployed: preview-cloudflare '$CLOUDFLARE', preview-netlify '$NETLIFY', expected '$EXPECTED'"
+          [ "$CLOUDFLARE" = "$EXPECTED" ] && [ "$NETLIFY" = "$EXPECTED" ]
+      
+      # From templates/ci.yml: hand the execution cache to pdf-check.
+      - name: Upload executed notebooks for pdf-check
+        if: env.PDF_CHECK == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: jupyter-cache
+          path: _build/.jupyter_cache
+          include-hidden-files: true
+          retention-days: 1
+          overwrite: true
+
+  # From templates/ci.yml, with this repository's image.
+  pdf-check:
+    needs: preview
+    if: needs.preview.outputs.pdf-check == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/quantecon/quantecon-build:latest
+
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup environment
+        uses: quantecon/actions/setup-environment@v0.14.0
+
+      - name: Download executed notebooks
+        uses: actions/download-artifact@v8
+        with:
+          name: jupyter-cache
+          path: _build/.jupyter_cache
+
+      - name: Build lectures (PDF)
+        uses: quantecon/actions/build-lectures@v0.14.0
+        with:
+          builder: 'pdflatex'
+          source-dir: 'lectures'
+          extra-args: '-W --keep-going'
+
+      - name: Upload LaTeX log on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: latex-log
+          path: _build/latex/*.log
+          if-no-files-found: ignore
+          retention-days: 7
