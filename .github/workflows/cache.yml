@@ -28,7 +28,7 @@ jobs:
           fetch-depth: 0
       
       - name: Build and Cache
-        uses: quantecon/actions/build-jupyter-cache@v0
+        uses: quantecon/actions/build-jupyter-cache@v0.16.0
         with:
           builders: 'html'
           source-dir: 'lectures'
