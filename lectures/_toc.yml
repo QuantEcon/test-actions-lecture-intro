@@ -27,7 +27,6 @@ parts:
   - file: short_path
   - file: lln_clt
   - file: solow
-  - file: linear_equations
 - caption: Other
   numbered: true
   chapters:
