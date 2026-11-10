@@ -18,23 +18,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
       
-      - name: Restore Build Cache
+      - name: Restore Execution Cache
         id: cache
-        uses: quantecon/actions/restore-jupyter-cache@v0
+        uses: quantecon/actions/restore-jupyter-cache@v0.17.0
         with:
-          cache-type: 'build'
+          cache-type: 'execution'
           source-dir: 'lectures'
           save-cache: 'true'
       
       - name: Build PDF
-        uses: quantecon/actions/build-lectures@v0
+        uses: quantecon/actions/build-lectures@v0.17.0
         with:
           source-dir: 'lectures'
           builder: 'pdflatex'
           upload-failure-reports: true
       
       - name: Build Notebooks
-        uses: quantecon/actions/build-lectures@v0
+        uses: quantecon/actions/build-lectures@v0.17.0
         with:
           source-dir: 'lectures'
           builder: 'jupyter'
@@ -42,7 +42,7 @@ jobs:
       
       - name: Build HTML
         id: build
-        uses: quantecon/actions/build-lectures@v0
+        uses: quantecon/actions/build-lectures@v0.17.0
         with:
           source-dir: 'lectures'
           builder: 'html'
@@ -54,7 +54,7 @@ jobs:
       # release staged here (QuantEcon/actions CONTRIBUTING.md, Staged Releases)
       # exercises both preview providers. Project: qe-preview-canary.
       - name: Deploy to Cloudflare Pages
-        uses: quantecon/actions/preview-cloudflare@v0
+        uses: quantecon/actions/preview-cloudflare@v0.17.0
         with:
           build-dir: ${{ steps.build.outputs.build-path }}
           cloudflare-api-token: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
@@ -62,7 +62,7 @@ jobs:
           project-name: qe-preview-canary
       
       - name: Deploy to Netlify
-        uses: quantecon/actions/preview-netlify@v0
+        uses: quantecon/actions/preview-netlify@v0.17.0
         with:
           build-dir: ${{ steps.build.outputs.build-path }}
           netlify-auth-token: ${{ secrets.NETLIFY_AUTH_TOKEN }}

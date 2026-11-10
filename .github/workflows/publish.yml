@@ -32,14 +32,14 @@ jobs:
           fetch-depth: 0
       
       - name: Build PDF
-        uses: quantecon/actions/build-lectures@v0
+        uses: quantecon/actions/build-lectures@v0.17.0
         with:
           source-dir: 'lectures'
           builder: 'pdflatex'
           upload-failure-reports: true
       
       - name: Build Notebooks
-        uses: quantecon/actions/build-lectures@v0
+        uses: quantecon/actions/build-lectures@v0.17.0
         with:
           source-dir: 'lectures'
           builder: 'jupyter'
@@ -47,7 +47,7 @@ jobs:
       
       - name: Build HTML
         id: build
-        uses: quantecon/actions/build-lectures@v0
+        uses: quantecon/actions/build-lectures@v0.17.0
         with:
           source-dir: 'lectures'
           builder: 'html'
@@ -57,6 +57,6 @@ jobs:
       
       - name: Deploy to GitHub Pages
         id: deploy
-        uses: quantecon/actions/publish-gh-pages@v0
+        uses: quantecon/actions/publish-gh-pages@v0.17.0
         with:
           build-dir: ${{ steps.build.outputs.build-path }}
