@@ -46,6 +46,6 @@ gh workflow run gate.yml --repo QuantEcon/test-actions-lecture-intro --ref main 
 gh run watch <run id> --repo QuantEcon/test-actions-lecture-intro --exit-status
 ```
 
-`gh workflow run` prints the new run's URL, and the number at its end is the run id that `gh run watch` takes; with `--exit-status`, a red run fails the command. If no URL is printed, the run is the newest that `gh run list --repo QuantEcon/test-actions-lecture-intro --workflow gate.yml --limit 1` lists. Move `v0` only when the run is green: QuantEcon/actions' CONTRIBUTING, Staged Releases, has the whole procedure.
+`gh workflow run` prints the new run's URL, and the number at its end is the run id that `gh run watch` takes; with `--exit-status`, a red run fails the command. If no URL is printed, `gh run list --repo QuantEcon/test-actions-lecture-intro --workflow gate.yml --limit 1 --json databaseId --jq '.[0].databaseId'` prints the newest run's id. Move `v0` only when the run is green: QuantEcon/actions' CONTRIBUTING, Staged Releases, has the whole procedure.
 
 On any other branch the two deploy jobs are refused by their environments, which allow `main` only, so a branch run is always red. The jobs before the deploys still show whether the build works.

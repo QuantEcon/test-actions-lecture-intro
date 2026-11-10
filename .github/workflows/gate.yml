@@ -13,7 +13,7 @@
 # build-jupyter-cache's nested calls are pointed at the same checkout, so its
 # siblings run at the candidate too. What the gate does not cover: how
 # consumers fetch the actions by tag; build-jupyter-cache exactly as shipped;
-# setup-environment outside a container, setup-latex, deploy-cloudflare and
+# setup-environment outside a container; setup-latex; deploy-cloudflare;
 # preview-workers; and the previews' pull-request half (the pr-<N> alias,
 # change detection, the comment).
 #
