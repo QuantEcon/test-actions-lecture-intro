@@ -42,7 +42,7 @@ jobs:
     outputs:
       comment-id: ${{ steps.found.outputs.id }}
     steps:
-      - uses: quantecon/actions/preview-workers@0cc12c09d0d3a1f3599e9cace22d8a50be1b47a6
+      - uses: quantecon/actions/preview-workers@709572d5a61197f3bee3edbfc64a3e0e88165b51
         with:
           placeholder: 'true'
           worker-name: ${{ vars.CLOUDFLARE_WORKER_NAME }}
@@ -97,21 +97,28 @@ jobs:
           done
           echo "$MARKER" > "$RUNNER_TEMP/marker"
 
+      # The pull request's previous run of this workflow, whatever its
+      # conclusion: the version URL its upload printed, and the marker its
+      # site carried, which is built from its run id, attempt and commit.
       - name: Find the previous run's version
         if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           HEAD_REF: ${{ github.head_ref }}
+          RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
           prev=$(gh run list --repo "$REPO" --workflow preview-workers-check.yml --branch "$HEAD_REF" --event pull_request \
-            --status success --limit 1 --json databaseId --jq '.[0].databaseId // ""')
-          if [ -z "$prev" ]; then echo "no earlier successful run on this branch"; exit 0; fi
-          gh run download "$prev" --repo "$REPO" --name preview-version --dir "$RUNNER_TEMP/previous"
-          cat "$RUNNER_TEMP/previous/version.tsv"
+            --limit 20 --json databaseId --jq ".[] | select(.databaseId != $RUN_ID) | .databaseId" | head -n 1)
+          if [ -z "$prev" ]; then echo "no earlier run on this branch"; exit 0; fi
+          old_marker=$(gh run view "$prev" --repo "$REPO" --json databaseId,attempt,headSha --jq '"run \(.databaseId).\(.attempt) at \(.headSha)"')
+          old_url=$(gh run view "$prev" --repo "$REPO" --log | grep -o '📌 This version: *https://[0-9a-f]\{8\}-[a-z0-9.-]*' | tail -n 1 | grep -o 'https://.*' || true)
+          if [ -z "$old_url" ]; then echo "run $prev printed no version URL"; exit 0; fi
+          mkdir -p "$RUNNER_TEMP/previous"
+          printf '%s\t%s\n' "$old_url" "$old_marker" | tee "$RUNNER_TEMP/previous/version.tsv"
 
-      - uses: quantecon/actions/preview-workers@0cc12c09d0d3a1f3599e9cace22d8a50be1b47a6
+      - uses: quantecon/actions/preview-workers@709572d5a61197f3bee3edbfc64a3e0e88165b51
         id: preview
         continue-on-error: ${{ inputs.account-subdomain == 'quantecon-wrong' }}
         with:
@@ -145,12 +152,16 @@ jobs:
           bad=0
           fail() { echo "::error::$1"; bad=1; }
           ok() { echo "✓ $1"; }
-          # A page, with retries for a new alias to appear: prints its body.
+          # A page that holds the marker $2, following redirects as a browser
+          # does, with retries for a new alias to appear. Its body lands in
+          # $RUNNER_TEMP/page, and it prints the URL it ended at: Workers'
+          # static assets answer /<page>.html with a 307 to /<page>.
           page() {
-            local body
+            local final
             for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
-              if body=$(curl -fsS --max-time 15 "$1" 2>/dev/null) && grep -qF "$2" <<< "$body"; then
-                printf '%s' "$body"; return 0
+              if final=$(curl -fsSL --max-time 15 -o "$RUNNER_TEMP/page" -w '%{url_effective}' "$1" 2>/dev/null) \
+                 && grep -qF "$2" "$RUNNER_TEMP/page"; then
+                printf '%s' "$final"; return 0
               fi
               sleep 5
             done
@@ -181,7 +192,13 @@ jobs:
 
           if [ "$EVENT_NAME" = pull_request ]; then
             grep -qx 'lectures/about.md' <<< "$CHANGED_FILES" && ok "changed-files lists lectures/about.md" || fail "changed-files is [$CHANGED_FILES]"
-            page "$DEPLOY_URL/about.html" "$marker" > /dev/null && ok "the lecture link serves this run" || fail "$DEPLOY_URL/about.html does not serve [$marker]"
+            # The comment's link, followed as a browser follows it: it must
+            # stay on this preview's host, wherever Cloudflare sends it.
+            if final=$(page "$DEPLOY_URL/about.html" "$marker") && [[ "$final" == "$DEPLOY_URL/"* ]]; then
+              ok "the lecture link serves this run, at $final"
+            else
+              fail "$DEPLOY_URL/about.html does not serve [$marker] on $DEPLOY_URL (it ended at [${final:-nothing}])"
+            fi
 
             gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
               --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- quantecon-preview:workers -->")))' > "$RUNNER_TEMP/comments.json"
@@ -199,18 +216,12 @@ jobs:
             # Step 2: the last push's version still serves the last push.
             if [ -f "$RUNNER_TEMP/previous/version.tsv" ]; then
               IFS=$'\t' read -r old_url old_marker < "$RUNNER_TEMP/previous/version.tsv"
-              body=$(page "$old_url/" "$old_marker") && ! grep -qF "$marker" <<< "$body" \
-                && ok "the last push's version, $old_url, still serves [$old_marker]" \
-                || fail "$old_url/ does not serve the last push's [$old_marker]"
+              if page "$old_url/" "$old_marker" > /dev/null && ! grep -qF "$marker" "$RUNNER_TEMP/page"; then
+                ok "the last push's version, $old_url, still serves [$old_marker]"
+              else
+                fail "$old_url/ does not serve the last push's [$old_marker]"
+              fi
             fi
           fi
 
-          printf '%s\t%s\n' "$DEPLOYMENT_URL" "$marker" > "$RUNNER_TEMP/version.tsv"
           exit "$bad"
-
-      - uses: actions/upload-artifact@v7
-        if: success() && github.event_name == 'pull_request'
-        with:
-          name: preview-version
-          path: ${{ runner.temp }}/version.tsv
-          retention-days: 7
