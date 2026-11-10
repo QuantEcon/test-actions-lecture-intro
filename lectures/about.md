@@ -73,3 +73,5 @@ In particular, we sincerely thank and give credit to
 
 We also thank Noritaka Kudoh for encouraging us to start this project and providing thoughtful suggestions.
 
+
+This sentence was added by QuantEcon/actions v0.18.0's staged release (push 1).
