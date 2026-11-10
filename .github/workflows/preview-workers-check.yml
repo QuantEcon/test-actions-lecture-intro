@@ -1,0 +1,216 @@
+# preview-workers' first real uploads (QuantEcon/actions#145), to the canary's
+# own Worker, qe-preview-canary. For a branch of the canary, not for main.
+#
+# The candidate is a commit of QuantEcon/actions, named in both `uses:` lines
+# below, since `uses:` takes no expression: set both to the commit under test.
+#
+# How to run it:
+#   1. Push this file to .github/workflows/ on a canary branch, with an edit to
+#      lectures/about.md, and open a pull request from that branch. The
+#      placeholder job posts the pending comment; the deploy job, which waits
+#      for it, uploads and replaces that comment in place, then asserts.
+#   2. Push one more commit to the branch. The same deploy-url must serve the
+#      new build, and the first run's deployment-url the old one.
+#   3. Dispatch the workflow on the branch, with the default inputs. It
+#      uploads to dispatch-canary-workers, with no comment.
+#   4. Dispatch it with account-subdomain: quantecon-wrong. The action must
+#      fail after the upload, naming the URL Cloudflare gave.
+# Each run's log has "wrangler's record of the upload" in a group: the first
+# one's line is the real record for the harness's preview-workers-url fixture.
+name: preview-workers check (QuantEcon/actions#145)
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      account-subdomain:
+        description: "The account-subdomain to pass. quantecon-wrong checks that a wrong one fails the job."
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  placeholder:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      comment-id: ${{ steps.found.outputs.id }}
+    steps:
+      - uses: quantecon/actions/preview-workers@0cc12c09d0d3a1f3599e9cace22d8a50be1b47a6
+        with:
+          placeholder: 'true'
+          worker-name: ${{ vars.CLOUDFLARE_WORKER_NAME }}
+          account-subdomain: ${{ vars.CLOUDFLARE_WORKERS_SUBDOMAIN }}
+
+      - name: Find the pending comment
+        id: found
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- quantecon-preview:workers -->"))) | [.id, (.body | split("\n")[1])] | @tsv' > comments.tsv
+          cat comments.tsv
+          [ "$(wc -l < comments.tsv)" -eq 1 ] || { echo "::error::expected one preview-workers comment, found $(wc -l < comments.tsv)"; exit 1; }
+          IFS=$'\t' read -r id heading < comments.tsv
+          [ "$heading" = "## ⏳ Cloudflare Workers Preview Building…" ] || { echo "::error::the comment's heading is [$heading], not the pending one"; exit 1; }
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "✓ pending comment $id"
+
+  deploy:
+    needs: placeholder
+    # After the placeholder on a pull request, so that the deploy's comment
+    # can be seen to replace it; on its own on a dispatch.
+    if: ${{ !cancelled() && (needs.placeholder.result == 'success' || needs.placeholder.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read          # the previous run's version, for step 2
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Build a site that names this run
+        env:
+          MARKER: "run ${{ github.run_id }}.${{ github.run_attempt }} at ${{ github.event.pull_request.head.sha || github.sha }}"
+        run: |
+          set -euo pipefail
+          mkdir -p site
+          for page in index about; do
+            printf '<!doctype html>\n<title>%s</title>\n<p id="marker">%s</p>\n' "$page" "$MARKER" > "site/$page.html"
+          done
+          echo "$MARKER" > "$RUNNER_TEMP/marker"
+
+      - name: Find the previous run's version
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          prev=$(gh run list --repo "$REPO" --workflow preview-workers-check.yml --branch "$HEAD_REF" --event pull_request \
+            --status success --limit 1 --json databaseId --jq '.[0].databaseId // ""')
+          if [ -z "$prev" ]; then echo "no earlier successful run on this branch"; exit 0; fi
+          gh run download "$prev" --repo "$REPO" --name preview-version --dir "$RUNNER_TEMP/previous"
+          cat "$RUNNER_TEMP/previous/version.tsv"
+
+      - uses: quantecon/actions/preview-workers@0cc12c09d0d3a1f3599e9cace22d8a50be1b47a6
+        id: preview
+        continue-on-error: ${{ inputs.account-subdomain == 'quantecon-wrong' }}
+        with:
+          cloudflare-api-token: ${{ secrets.CLOUDFLARE_WORKERS_TOKEN }}
+          cloudflare-account-id: ${{ secrets.CLOUDFLARE_QE_ACCOUNT_ID }}
+          worker-name: ${{ vars.CLOUDFLARE_WORKER_NAME }}
+          account-subdomain: ${{ inputs.account-subdomain || vars.CLOUDFLARE_WORKERS_SUBDOMAIN }}
+          build-dir: site
+          lectures-dir: lectures
+          dispatch-alias: dispatch-canary-workers
+
+      - name: Assert what the action did
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          WORKER: ${{ vars.CLOUDFLARE_WORKER_NAME }}
+          SUBDOMAIN: ${{ vars.CLOUDFLARE_WORKERS_SUBDOMAIN }}
+          WRONG: ${{ inputs.account-subdomain == 'quantecon-wrong' }}
+          OUTCOME: ${{ steps.preview.outcome }}
+          DEPLOYED: ${{ steps.preview.outputs.deployed }}
+          DEPLOY_URL: ${{ steps.preview.outputs.deploy-url }}
+          DEPLOYMENT_URL: ${{ steps.preview.outputs.deployment-url }}
+          CHANGED_FILES: ${{ steps.preview.outputs.changed-files }}
+          PENDING_ID: ${{ needs.placeholder.outputs.comment-id }}
+        run: |
+          set -euo pipefail
+          marker=$(cat "$RUNNER_TEMP/marker")
+          bad=0
+          fail() { echo "::error::$1"; bad=1; }
+          ok() { echo "✓ $1"; }
+          # A page, with retries for a new alias to appear: prints its body.
+          page() {
+            local body
+            for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+              if body=$(curl -fsS --max-time 15 "$1" 2>/dev/null) && grep -qF "$2" <<< "$body"; then
+                printf '%s' "$body"; return 0
+              fi
+              sleep 5
+            done
+            return 1
+          }
+
+          if [ "$WRONG" = true ]; then
+            [ "$OUTCOME" = failure ] && ok "a wrong account-subdomain failed the step" || fail "a wrong account-subdomain: the step's outcome is [$OUTCOME], not failure"
+            [ "$DEPLOYED" = false ] && [ -z "$DEPLOY_URL" ] && ok "deployed is false, with no deploy-url" || fail "a wrong account-subdomain: deployed [$DEPLOYED], deploy-url [$DEPLOY_URL]"
+            echo "The step's annotation should name the URL Cloudflare gave, https://dispatch-canary-workers-$WORKER.$SUBDOMAIN.workers.dev."
+            exit "$bad"
+          fi
+
+          if [ "$EVENT_NAME" = pull_request ]; then alias="pr-$PR_NUMBER"; else alias=dispatch-canary-workers; fi
+          want="https://$alias-$WORKER.$SUBDOMAIN.workers.dev"
+          [ "$OUTCOME" = success ] && [ "$DEPLOYED" = true ] && ok "deployed" || fail "outcome [$OUTCOME], deployed [$DEPLOYED]"
+          [ "$DEPLOY_URL" = "$want" ] && ok "deploy-url is $want" || fail "deploy-url is [$DEPLOY_URL], not $want"
+          page "$DEPLOY_URL/" "$marker" > /dev/null && ok "deploy-url serves this run" || fail "$DEPLOY_URL/ does not serve [$marker]"
+          re="^https://[0-9a-f]{8}-$WORKER\\.$SUBDOMAIN\\.workers\\.dev$"
+          [[ "$DEPLOYMENT_URL" =~ $re ]] && ok "deployment-url is $DEPLOYMENT_URL" || fail "deployment-url [$DEPLOYMENT_URL] is not of the form https://<8 hex>-$WORKER.$SUBDOMAIN.workers.dev"
+          page "$DEPLOYMENT_URL/" "$marker" > /dev/null && ok "deployment-url serves this run" || fail "$DEPLOYMENT_URL/ does not serve [$marker]"
+
+          # The Worker's production URL still serves the dashboard's Hello
+          # World, as plain text: no upload is ever deployed to it.
+          prod="https://$WORKER.$SUBDOMAIN.workers.dev/"
+          type=$(curl -fsS --max-time 15 -o "$RUNNER_TEMP/prod" -w '%{content_type}' "$prod" || true)
+          if [[ "$type" == text/plain* ]] && ! grep -qF "$marker" "$RUNNER_TEMP/prod"; then ok "production is untouched ($type)"; else fail "production [$prod] answered [$type]"; fi
+
+          if [ "$EVENT_NAME" = pull_request ]; then
+            grep -qx 'lectures/about.md' <<< "$CHANGED_FILES" && ok "changed-files lists lectures/about.md" || fail "changed-files is [$CHANGED_FILES]"
+            page "$DEPLOY_URL/about.html" "$marker" > /dev/null && ok "the lecture link serves this run" || fail "$DEPLOY_URL/about.html does not serve [$marker]"
+
+            gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
+              --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- quantecon-preview:workers -->")))' > "$RUNNER_TEMP/comments.json"
+            n=$(jq -s 'length' "$RUNNER_TEMP/comments.json")
+            [ "$n" = 1 ] && ok "one preview-workers comment" || fail "$n preview-workers comments, not one"
+            id=$(jq -rs '.[0].id' "$RUNNER_TEMP/comments.json")
+            jq -rs '.[0].body' "$RUNNER_TEMP/comments.json" > "$RUNNER_TEMP/body.md"
+            [ "$id" = "$PENDING_ID" ] && ok "the deploy replaced the placeholder's comment $id in place" || fail "the comment is $id, the placeholder's was [$PENDING_ID]"
+            sed -n 2p "$RUNNER_TEMP/body.md" | grep -qxF '## ☁️ Cloudflare Workers Preview Ready!' && ok "the ready heading" || fail "the comment's heading is [$(sed -n 2p "$RUNNER_TEMP/body.md")]"
+            grep -qF "/commit/$HEAD_SHA)" "$RUNNER_TEMP/body.md" && ok "it names this commit" || fail "the comment does not name $HEAD_SHA"
+            grep -qF "($DEPLOY_URL/about.html)" "$RUNNER_TEMP/body.md" && ok "it links the changed lecture" || fail "the comment does not link $DEPLOY_URL/about.html"
+            grep -qF "**This deployment:** $DEPLOYMENT_URL " "$RUNNER_TEMP/body.md" && ok "it names this version" || fail "the comment does not name $DEPLOYMENT_URL"
+            echo "::group::The comment"; cat "$RUNNER_TEMP/body.md"; echo "::endgroup::"
+
+            # Step 2: the last push's version still serves the last push.
+            if [ -f "$RUNNER_TEMP/previous/version.tsv" ]; then
+              IFS=$'\t' read -r old_url old_marker < "$RUNNER_TEMP/previous/version.tsv"
+              body=$(page "$old_url/" "$old_marker") && ! grep -qF "$marker" <<< "$body" \
+                && ok "the last push's version, $old_url, still serves [$old_marker]" \
+                || fail "$old_url/ does not serve the last push's [$old_marker]"
+            fi
+          fi
+
+          printf '%s\t%s\n' "$DEPLOYMENT_URL" "$marker" > "$RUNNER_TEMP/version.tsv"
+          exit "$bad"
+
+      - uses: actions/upload-artifact@v7
+        if: success() && github.event_name == 'pull_request'
+        with:
+          name: preview-version
+          path: ${{ runner.temp }}/version.tsv
+          retention-days: 7
