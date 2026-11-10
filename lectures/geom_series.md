@@ -955,3 +955,5 @@ plt.show()
 Notice here, whether government spending increases from 0.3 to 0.4 or
 investment increases from 0.3 to 0.4, the shifts in the graphs are
 identical.
+
+This sentence was added by QuantEcon/actions v0.18.0 staged release push 2.
