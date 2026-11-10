@@ -1,0 +1,593 @@
+# The release gate (QuantEcon/actions#135). It builds, previews and publishes
+# the fixture in gate/ (#136) with QuantEcon/actions checked out at a
+# candidate commit, so that a release is tested before v0 moves to it. On main,
+# for a candidate:
+#
+#   gh workflow run gate.yml --repo QuantEcon/test-actions-lecture-intro \
+#     --ref main -f candidate=vX.Y.Z
+#
+# Move v0 only when the run is green. gate/README.md has the rules the fixture
+# keeps, and how the image below is moved.
+#
+# Every action runs from the checkout, as `uses: ./actions-repo/<action>`, and
+# build-jupyter-cache's nested calls are pointed at the same checkout, so its
+# siblings run at the candidate too. What the gate does not cover: how
+# consumers fetch the actions by tag; build-jupyter-cache exactly as shipped;
+# setup-environment outside a container, setup-latex and deploy-cloudflare;
+# and the previews' pull-request half (the pr-<N> alias, change detection, the
+# comment).
+#
+# The two deploy jobs use environments that allow main only, and only they
+# hold secrets. So on any other branch they are refused and the run is red;
+# the jobs before them still show whether the build works.
+name: Release gate
+run-name: Release gate on ${{ inputs.candidate }} (self-test ${{ inputs.self-test }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate:
+        description: >-
+          The QuantEcon/actions commit to test: a full 40-character SHA, or a v* tag such as
+          v0.18.0. Refused unless it is reachable from main or a v* tag.
+        required: true
+        type: string
+      self-test:
+        description: >-
+          Stage a failure, to show that the gate goes red: build-fails adds a raising cell to the
+          fixture; nothing-deployed runs the previews without their dispatch-alias. off tests the
+          candidate.
+        required: false
+        type: choice
+        options: ['off', 'build-fails', 'nothing-deployed']
+        default: 'off'
+
+permissions: {}
+
+# A container job's run: steps default to sh, which has no pipefail.
+defaults:
+  run:
+    shell: bash
+
+# One gate run at a time. A second dispatch waits; a third replaces the second.
+concurrency:
+  group: release-gate
+  cancel-in-progress: false
+
+env:
+  # The image every build job runs, by digest, so that it cannot move between
+  # runs. Moved by hand (gate/README.md); QuantEcon/actions keeps the digest in
+  # .github/container-pins.txt, so it is not pruned.
+  GATE_IMAGE: ghcr.io/quantecon/quantecon-build@sha256:d7676921274c293603a34d1592a18352737794200e7563071417ef08cb93976d
+  # The previews' alias. One alias, overwritten each run, so none build up.
+  GATE_ALIAS: dispatch-release-gate
+
+jobs:
+  # Before every other job, and so before any job that holds a secret.
+  candidate:
+    name: Check the candidate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.check.outputs.sha }}
+      from: ${{ steps.check.outputs.from }}
+      image: ${{ steps.check.outputs.image }}
+    steps:
+      - name: Check that the candidate is on main or a v* tag
+        id: check
+        env:
+          CANDIDATE: ${{ inputs.candidate }}
+          SELF_TEST: ${{ inputs.self-test }}
+        run: |
+          set -euo pipefail
+          # The input is checked before it is printed anywhere: a value with
+          # a line break could otherwise start a workflow command.
+          if [[ $CANDIDATE =~ ^[0-9a-f]{40}$ ]]; then
+            kind=commit
+          elif [[ $CANDIDATE =~ ^v[0-9]+(\.[0-9]+)*$ ]]; then
+            kind=tag
+          else
+            echo "::error::candidate must be a full 40-character commit SHA of QuantEcon/actions, or a v* tag of it such as v0.18.0"
+            exit 1
+          fi
+          case "$SELF_TEST" in
+            off|build-fails|nothing-deployed) ;;
+            *) echo "::error::self-test must be off, build-fails or nothing-deployed"; exit 1 ;;
+          esac
+
+          # Commits and trees only, which is all that reachability needs.
+          git clone --quiet --bare --filter=blob:none https://github.com/QuantEcon/actions.git actions.git
+          cd actions.git
+          if [ "$kind" = tag ]; then
+            sha=$(git rev-parse --verify --quiet "refs/tags/$CANDIDATE^{commit}") \
+              || { echo "::error::QuantEcon/actions has no tag $CANDIDATE"; exit 1; }
+          else
+            sha=$CANDIDATE
+            git cat-file -e "$sha^{commit}" 2>/dev/null \
+              || { echo "::error::$sha is not a commit of QuantEcon/actions"; exit 1; }
+          fi
+          if git merge-base --is-ancestor "$sha" refs/heads/main; then
+            from=main
+          else
+            tags=$(git tag --list 'v*' --contains "$sha" --sort=version:refname)
+            from=${tags%%$'\n'*}
+          fi
+          if [ -z "$from" ]; then
+            echo "::error::$sha is reachable from neither main nor a v* tag of QuantEcon/actions, so the gate does not test it"
+            exit 1
+          fi
+          {
+            echo "sha=$sha"
+            echo "from=$from"
+            echo "image=$GATE_IMAGE"
+          } >> "$GITHUB_OUTPUT"
+          echo "Candidate $CANDIDATE is $sha, reachable from $from"
+          {
+            echo "### Candidate"
+            echo ""
+            echo "QuantEcon/actions \`$CANDIDATE\` is [\`$sha\`](https://github.com/QuantEcon/actions/commit/$sha), reachable from \`$from\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  cache:
+    name: Build the cache (build-jupyter-cache)
+    needs: candidate
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.candidate.outputs.image }}
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Check out the fixture
+        uses: actions/checkout@v7
+        with:
+          # Full history: each page's "Last changed" date comes from git log.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out the candidate
+        uses: actions/checkout@v7
+        with:
+          repository: QuantEcon/actions
+          ref: ${{ needs.candidate.outputs.sha }}
+          path: actions-repo
+          persist-credentials: false
+
+      # GitHub allows no expression in `uses:`, so build-jupyter-cache names
+      # its siblings at a fixed ref, @v0. Pointed at the checkout instead, they
+      # run at the candidate. Any such call left over fails the job: a new
+      # nested call, or one this pattern no longer matches, would otherwise
+      # run the released version unnoticed.
+      - name: Point the nested calls at the candidate
+        run: |
+          set -euo pipefail
+          sed -i -E 's#(uses:[[:space:]]*)quantecon/actions/([A-Za-z0-9_-]+)@[^[:space:]]+#\1./actions-repo/\2#I' actions-repo/*/action.yml
+          if grep -inE 'uses:[[:space:]]*quantecon/actions/' actions-repo/*/action.yml; then
+            echo "::error::a nested call to quantecon/actions is still there, above; it would run a released version, not the candidate"
+            exit 1
+          fi
+          echo "Nested calls now at the candidate:"
+          grep -nE 'uses:[[:space:]]*\./actions-repo/' actions-repo/*/action.yml || echo "(none)"
+
+      - name: Stage a failing cell (self-test build-fails)
+        if: inputs.self-test == 'build-fails'
+        run: |
+          cat >> gate/lectures/figures.md <<'EOF'
+
+          ```{code-cell} ipython3
+          raise RuntimeError("release gate self-test: this cell is staged to fail")
+          ```
+          EOF
+          echo "::notice::self-test build-fails: a raising cell is appended to gate/lectures/figures.md, so this run must be red"
+
+      - name: Build and cache
+        id: bjc
+        uses: ./actions-repo/build-jupyter-cache
+        with:
+          builders: 'jupyter,pdflatex,html'
+          source-dir: gate/lectures
+          environment: gate/environment.yml
+          # The verdict job alerts for the whole gate.
+          create-issue-on-failure: 'false'
+
+      - name: Check what the build made
+        env:
+          BUILD_SUCCESS: ${{ steps.bjc.outputs.build-success }}
+          CACHE_SAVED: ${{ steps.bjc.outputs.cache-saved }}
+          JUPYTER: ${{ steps.bjc.outputs.jupyter-status }}
+          PDFLATEX: ${{ steps.bjc.outputs.pdflatex-status }}
+          HTML: ${{ steps.bjc.outputs.html-status }}
+        run: |
+          set -uo pipefail
+          failed=0
+          fail() { echo "::error::$1"; failed=1; }
+          [ "$BUILD_SUCCESS" = true ] || fail "build-success is '$BUILD_SUCCESS', not 'true'"
+          [ "$CACHE_SAVED" = true ] || fail "cache-saved is '$CACHE_SAVED', not 'true'"
+          [ "$JUPYTER" = success ] || fail "jupyter-status is '$JUPYTER'"
+          [ "$PDFLATEX" = success ] || fail "pdflatex-status is '$PDFLATEX'"
+          [ "$HTML" = success ] || fail "html-status is '$HTML'"
+          # Each code page prints this line only when it executes. The
+          # notebooks for download carry no outputs, so for them the check is
+          # that each holds its page's code.
+          for page in figures plotly data; do
+            line="gate executed $page 42"
+            grep -qF "$line" "_build/html/$page.html" || fail "_build/html/$page.html lacks '$line': the page did not execute"
+            if ! grep -qF "$line" _build/latex/gate.tex; then
+              fail "_build/latex/gate.tex lacks '$line': the PDF has no executed output for $page"
+              grep -nF "executed $page" _build/latex/gate.tex | head -n 3
+            fi
+            grep -qF "gate executed $page" "_build/jupyter/$page.ipynb" || fail "_build/jupyter/$page.ipynb lacks its page's code"
+            [ -s "_build/html/_notebooks/$page.ipynb" ] || fail "the site has no _notebooks/$page.ipynb"
+          done
+          [ -s _build/latex/gate.pdf ] || fail "no PDF at _build/latex/gate.pdf"
+          [ -s _build/html/_pdf/gate.pdf ] || fail "the site has no _pdf/gate.pdf"
+          [ "$failed" -eq 0 ] || exit 1
+          echo "All three builds passed, every page executed, and the cache is saved."
+
+  # As templates/ci.yml builds a pull request's preview: the execution cache.
+  preview-site:
+    name: Build the preview site (execution cache)
+    needs: [candidate, cache]
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.candidate.outputs.image }}
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Check out the fixture
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out the candidate
+        uses: actions/checkout@v7
+        with:
+          repository: QuantEcon/actions
+          ref: ${{ needs.candidate.outputs.sha }}
+          path: actions-repo
+          persist-credentials: false
+
+      - name: Set up the environment
+        uses: ./actions-repo/setup-environment
+
+      - name: Restore the execution cache
+        id: restore
+        uses: ./actions-repo/restore-jupyter-cache
+        with:
+          cache-type: 'execution'
+          source-dir: gate/lectures
+          environment: gate/environment.yml
+
+      - name: Check it is this run's cache
+        env:
+          HIT: ${{ steps.restore.outputs.cache-hit }}
+          KEY: ${{ steps.restore.outputs.cache-key }}
+        run: |
+          if [ "$HIT" != true ] || [[ $KEY != *"-$GITHUB_RUN_ID" ]]; then
+            echo "::error::expected this run's execution cache (a key ending -$GITHUB_RUN_ID), restored '$KEY' (cache-hit '$HIT')"
+            exit 1
+          fi
+          echo "Restored $KEY"
+
+      - name: Build HTML
+        id: build
+        uses: ./actions-repo/build-lectures
+        with:
+          builder: 'html'
+          source-dir: gate/lectures
+          upload-failure-reports: 'true'
+
+      - name: Mark the site with the candidate
+        env:
+          BUILD_PATH: ${{ steps.build.outputs.build-path }}
+          SHA: ${{ needs.candidate.outputs.sha }}
+        run: |
+          set -euo pipefail
+          for page in figures plotly data; do
+            grep -qF "gate executed $page 42" "$BUILD_PATH/$page.html" \
+              || { echo "::error::$page.html lacks its executed output after the restore"; exit 1; }
+          done
+          printf '%s\n' "$SHA" > "$BUILD_PATH/gate-marker-$GITHUB_RUN_ID.txt"
+
+      - name: Upload the site for the deploy job
+        uses: actions/upload-artifact@v7
+        with:
+          name: preview-site
+          path: _build/html
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
+  preview-deploy:
+    name: Deploy the previews
+    needs: [candidate, preview-site]
+    runs-on: ubuntu-latest
+    environment: release-gate
+    permissions:
+      contents: read
+    outputs:
+      netlify-url: ${{ steps.netlify.outputs.deploy-url }}
+      cloudflare-url: ${{ steps.cloudflare.outputs.deploy-url }}
+    steps:
+      # As templates/ci.yml's deploy job does. It runs no code from it.
+      - name: Check out the fixture
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Check out the candidate
+        uses: actions/checkout@v7
+        with:
+          repository: QuantEcon/actions
+          ref: ${{ needs.candidate.outputs.sha }}
+          path: actions-repo
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Download the site
+        uses: actions/download-artifact@v8
+        with:
+          name: preview-site
+          path: site
+
+      - name: Deploy to Netlify
+        id: netlify
+        uses: ./actions-repo/preview-netlify
+        with:
+          build-dir: site
+          netlify-auth-token: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          netlify-site-id: ${{ secrets.NETLIFY_SITE_ID }}
+          dispatch-alias: ${{ inputs.self-test != 'nothing-deployed' && env.GATE_ALIAS || '' }}
+
+      - name: Deploy to Cloudflare Pages
+        id: cloudflare
+        uses: ./actions-repo/preview-cloudflare
+        with:
+          build-dir: site
+          cloudflare-api-token: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
+          cloudflare-account-id: ${{ secrets.CLOUDFLARE_QE_ACCOUNT_ID }}
+          project-name: qe-preview-canary
+          dispatch-alias: ${{ inputs.self-test != 'nothing-deployed' && env.GATE_ALIAS || '' }}
+
+      # By content, never by status alone: a Cloudflare Pages preview answers
+      # 200 with index.html for a path it does not have.
+      - name: Check both previews serve this build
+        env:
+          SHA: ${{ needs.candidate.outputs.sha }}
+          NETLIFY_DEPLOYED: ${{ steps.netlify.outputs.deployed }}
+          NETLIFY_URL: ${{ steps.netlify.outputs.deploy-url }}
+          CLOUDFLARE_DEPLOYED: ${{ steps.cloudflare.outputs.deployed }}
+          CLOUDFLARE_URL: ${{ steps.cloudflare.outputs.deploy-url }}
+        run: |
+          set -uo pipefail
+          marker="gate-marker-$GITHUB_RUN_ID.txt"
+          serves() { # name deployed url
+            if [ "$2" != true ]; then
+              echo "::error::$1 deployed nothing (deployed is '$2')"
+              return 1
+            fi
+            for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+              body=$(curl -fsSL --max-time 20 "${3%/}/$marker") && [ "$body" = "$SHA" ] && {
+                echo "$1 serves this build at $3"
+                return 0
+              }
+              sleep 10
+            done
+            echo "::error::$1 at $3 does not serve $marker with this candidate's SHA"
+            return 1
+          }
+          failed=0
+          serves Netlify "$NETLIFY_DEPLOYED" "$NETLIFY_URL" || failed=1
+          serves "Cloudflare Pages" "$CLOUDFLARE_DEPLOYED" "$CLOUDFLARE_URL" || failed=1
+          exit "$failed"
+
+  # As the canary's ci.yml builds: the build cache, then the HTML with the PDF
+  # and notebooks the cache holds.
+  publish-site:
+    name: Build the published site (build cache)
+    needs: [candidate, cache]
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.candidate.outputs.image }}
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Check out the fixture
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out the candidate
+        uses: actions/checkout@v7
+        with:
+          repository: QuantEcon/actions
+          ref: ${{ needs.candidate.outputs.sha }}
+          path: actions-repo
+          persist-credentials: false
+
+      - name: Restore the build cache
+        id: restore
+        uses: ./actions-repo/restore-jupyter-cache
+        with:
+          cache-type: 'build'
+          source-dir: gate/lectures
+          environment: gate/environment.yml
+
+      - name: Check it is this run's cache
+        env:
+          HIT: ${{ steps.restore.outputs.cache-hit }}
+          KEY: ${{ steps.restore.outputs.cache-key }}
+        run: |
+          if [ "$HIT" != true ] || [[ $KEY != *"-$GITHUB_RUN_ID" ]]; then
+            echo "::error::expected this run's build cache (a key ending -$GITHUB_RUN_ID), restored '$KEY' (cache-hit '$HIT')"
+            exit 1
+          fi
+          echo "Restored $KEY"
+
+      - name: Build HTML
+        id: build
+        uses: ./actions-repo/build-lectures
+        with:
+          builder: 'html'
+          source-dir: gate/lectures
+          html-copy-pdf: 'true'
+          html-copy-notebooks: 'true'
+          upload-failure-reports: 'true'
+
+      - name: Mark the site with the candidate
+        env:
+          BUILD_PATH: ${{ steps.build.outputs.build-path }}
+          SHA: ${{ needs.candidate.outputs.sha }}
+        run: |
+          set -euo pipefail
+          for page in figures plotly data; do
+            grep -qF "gate executed $page 42" "$BUILD_PATH/$page.html" \
+              || { echo "::error::$page.html lacks its executed output after the restore"; exit 1; }
+            [ -s "$BUILD_PATH/_notebooks/$page.ipynb" ] \
+              || { echo "::error::the site has no _notebooks/$page.ipynb from the restored cache"; exit 1; }
+          done
+          [ -s "$BUILD_PATH/_pdf/gate.pdf" ] \
+            || { echo "::error::the site has no _pdf/gate.pdf from the restored cache"; exit 1; }
+          printf '%s\n' "$SHA" > "$BUILD_PATH/gate-marker-$GITHUB_RUN_ID.txt"
+
+      - name: Upload the site for GitHub Pages
+        uses: ./actions-repo/publish-gh-pages
+        with:
+          mode: 'upload'
+          build-dir: ${{ steps.build.outputs.build-path }}
+
+  publish-deploy:
+    name: Deploy to GitHub Pages
+    needs: [candidate, publish-site]
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.publish.outputs.page-url }}
+    # The canary's publish.yml deploys the same site in this group.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    outputs:
+      page-url: ${{ steps.publish.outputs.page-url }}
+    steps:
+      - name: Check out the candidate
+        uses: actions/checkout@v7
+        with:
+          repository: QuantEcon/actions
+          ref: ${{ needs.candidate.outputs.sha }}
+          path: actions-repo
+          persist-credentials: false
+
+      - name: Deploy
+        id: publish
+        uses: ./actions-repo/publish-gh-pages
+        with:
+          mode: 'deploy'
+
+      - name: Check the site serves this build
+        env:
+          SHA: ${{ needs.candidate.outputs.sha }}
+          PAGE_URL: ${{ steps.publish.outputs.page-url }}
+        run: |
+          set -uo pipefail
+          url="${PAGE_URL%/}/gate-marker-$GITHUB_RUN_ID.txt"
+          for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            body=$(curl -fsSL --max-time 20 "$url") && [ "$body" = "$SHA" ] && {
+              echo "GitHub Pages serves this build at $PAGE_URL"
+              exit 0
+            }
+            sleep 10
+          done
+          echo "::error::$url does not serve this candidate's SHA"
+          exit 1
+
+  verdict:
+    name: Release gate verdict
+    needs: [candidate, cache, preview-site, preview-deploy, publish-site, publish-deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Verdict
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          CANDIDATE: ${{ inputs.candidate }}
+          SELF_TEST: ${{ inputs.self-test }}
+          SHA: ${{ needs.candidate.outputs.sha }}
+          FROM: ${{ needs.candidate.outputs.from }}
+          NETLIFY_URL: ${{ needs.preview-deploy.outputs.netlify-url }}
+          CLOUDFLARE_URL: ${{ needs.preview-deploy.outputs.cloudflare-url }}
+          PAGE_URL: ${{ needs.publish-deploy.outputs.page-url }}
+        run: |
+          set -uo pipefail
+          # Every job must have succeeded: a skipped or cancelled one fails it.
+          red=$(jq -r 'to_entries[] | select(.value.result != "success") | "\(.key) \(.value.result)"' <<< "$NEEDS")
+          {
+            if [ -z "$red" ]; then
+              echo "## Release gate: green"
+            else
+              echo "## Release gate: red"
+            fi
+            echo ""
+            if [ "$SELF_TEST" != off ]; then
+              echo "**This run staged a failure (self-test \`$SELF_TEST\`).** Red is the expected result. Never cite it for a release."
+              echo ""
+            fi
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Candidate | \`$CANDIDATE\`: \`${SHA:-not resolved}\`, from \`${FROM:-?}\` |"
+            echo "| Image | \`$GATE_IMAGE\` |"
+            echo "| Branch | \`$GITHUB_REF_NAME\` |"
+            jq -r 'to_entries[] | "| `\(.key)` | \(.value.result) |"' <<< "$NEEDS"
+            echo "| Netlify preview | ${NETLIFY_URL:-none} |"
+            echo "| Cloudflare preview | ${CLOUDFLARE_URL:-none} |"
+            echo "| GitHub Pages | ${PAGE_URL:-none} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$red" ]; then
+            echo "::error::the release gate is red: $(tr '\n' ',' <<< "$red" | sed 's/,$//; s/,/, /g')"
+            exit 1
+          fi
+          echo "The release gate is green for $SHA."
+
+      # A red run from main reaches whoever dispatched it: GitHub notifies an
+      # assignee whatever they watch. Not from other branches, whose runs are
+      # always red (see the top of this file).
+      - name: Tell whoever dispatched the run
+        if: failure() && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DISPATCHER: ${{ github.triggering_actor }}
+          CANDIDATE: ${{ inputs.candidate }}
+          SELF_TEST: ${{ inputs.self-test }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          gh label create release-gate --color B60205 --description "A red run of the release gate (gate.yml)" --force
+          note=""
+          [ "$SELF_TEST" = off ] || note=" This run staged a failure (self-test \`$SELF_TEST\`), so red is expected."
+          body="The release gate is red for QuantEcon/actions \`$CANDIDATE\`: $RUN_URL. Do not move \`v0\` to it.$note"
+          issue=$(gh issue list --label release-gate --state open --json number --jq '.[0].number // empty')
+          if [ -n "$issue" ]; then
+            gh issue comment "$issue" --body "$body"
+            gh issue edit "$issue" --add-assignee "$DISPATCHER"
+          else
+            gh issue create --title "The release gate is red" --label release-gate --assignee "$DISPATCHER" \
+              --body "$body Close this issue once the gate is green again."
+          fi
