@@ -1,0 +1,8 @@
+# Each page is here for a way the build has broken before; ../README.md lists
+# them. gate.yml checks that every code page executed.
+format: jb-book
+root: intro
+chapters:
+- file: figures
+- file: plotly
+- file: data

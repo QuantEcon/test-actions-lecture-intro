@@ -1,0 +1,13 @@
+# Installed by nothing. The gate builds in a container, and setup-environment's
+# container mode installs nothing from its `environment` file.
+#
+# The file is here for its hash. build-jupyter-cache and restore-jupyter-cache
+# start their cache keys with the hash of `environment`, so this file gives the
+# gate's caches a prefix of their own. The canary's ci.yml keys its caches on
+# the root environment.yml, so it never restores the gate's, and the gate never
+# restores its.
+#
+# Dependabot's conda updates read only the root environment.yml
+# (directory: /), so they never change this file.
+name: release-gate-fixture
+dependencies: []
