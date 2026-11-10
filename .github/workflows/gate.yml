@@ -13,9 +13,9 @@
 # build-jupyter-cache's nested calls are pointed at the same checkout, so its
 # siblings run at the candidate too. What the gate does not cover: how
 # consumers fetch the actions by tag; build-jupyter-cache exactly as shipped;
-# setup-environment outside a container, setup-latex and deploy-cloudflare;
-# and the previews' pull-request half (the pr-<N> alias, change detection, the
-# comment).
+# setup-environment outside a container; setup-latex; deploy-cloudflare;
+# preview-workers; and the previews' pull-request half (the pr-<N> alias,
+# change detection, the comment).
 #
 # The two deploy jobs use environments that allow main only, and only they
 # hold secrets. So on any other branch they are refused and the run is red;
