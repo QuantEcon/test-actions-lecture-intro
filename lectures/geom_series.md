@@ -955,3 +955,7 @@ plt.show()
 Notice here, whether government spending increases from 0.3 to 0.4 or
 investment increases from 0.3 to 0.4, the shifts in the graphs are
 identical.
+
+```{code-cell} ipython3
+print("Staged QuantEcon/actions v0.17.0: this cell is new, so only geom_series re-executes.")
+```
