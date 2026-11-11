@@ -1,0 +1,75 @@
+# Restore Workflow (GitHub Pages)
+#
+# Puts the site back as one of the repository's releases holds it, without a
+# build: run it by hand when the published site is broken or gone and a
+# rebuild would be slow, or would not give back the same site. One job:
+#   restore-gh-pages  downloads the release's archive and checksum, checks
+#                     the archive's SHA-256, and extracts the site.
+#   publish-gh-pages  deploys that site to GitHub Pages, as publish.yml
+#                     deploys a build.
+#
+# It runs no repository or notebook code, so the Pages permissions can sit in
+# the same job as the download.
+#
+# Copy to your repository as .github/workflows/restore.yml, before you need it.
+# To run it: Actions → Restore → Run workflow, on the default branch, with the
+# release's tag. Or: gh workflow run restore.yml -f tag=publish-2026-11-10
+#
+# Prerequisites:
+#   1. Releases that hold the site. publish.yml makes them with its
+#      release-assets job, on each tag it publishes. A site with no such
+#      release has nothing to restore.
+#   2. GitHub Pages with Source → "GitHub Actions" (Settings → Pages), as
+#      publish.yml needs. A site deployed from a gh-pages branch is restored by
+#      reverting that branch instead.
+#
+# The restored site stays up until the next publish, which replaces it: if the
+# fault is in the source, fix it, or pause publish.yml, before the next push.
+#
+# Action versions: @v0 = latest 0.x release (floating); pin @v0.x.y for reproducibility. Latest at:
+#   https://github.com/quantecon/actions/releases
+
+name: Restore
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'The tag of the release to restore, such as publish-2026-11-10'
+        required: true
+        type: string
+
+# The same group as publish.yml, so that a restore and a publish never deploy
+# at once.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read            # Required to read the release
+      pages: write              # Required for GitHub Pages deployment
+      id-token: write           # Required for GitHub Pages OIDC
+
+    # By default only the default branch may deploy here, so run the workflow
+    # on it.
+    environment:
+      name: github-pages
+      url: ${{ steps.publish.outputs.page-url }}
+
+    steps:
+      - name: Restore the site from the release
+        id: restore
+        uses: quantecon/actions/restore-gh-pages@v0.19.0
+        with:
+          tag: ${{ inputs.tag }}
+          # asset-name: 'lecture-python-html'   # Only if the release holds two archives for the tag
+
+      - name: Publish to GitHub Pages
+        id: publish
+        uses: quantecon/actions/publish-gh-pages@v0.19.0
+        with:
+          build-dir: ${{ steps.restore.outputs.build-dir }}
