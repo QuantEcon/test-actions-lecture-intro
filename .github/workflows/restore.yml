@@ -54,8 +54,9 @@ jobs:
       pages: write              # Required for GitHub Pages deployment
       id-token: write           # Required for GitHub Pages OIDC
 
-    # By default only the default branch may deploy here, so run the workflow
-    # on it.
+    # Only the refs the github-pages environment admits may deploy here: the
+    # default branch, and any tag pattern added for publish.yml's release
+    # assets. Run the workflow on the default branch.
     environment:
       name: github-pages
       url: ${{ steps.publish.outputs.page-url }}
@@ -63,13 +64,13 @@ jobs:
     steps:
       - name: Restore the site from the release
         id: restore
-        uses: quantecon/actions/restore-gh-pages@v0.19.0
+        uses: quantecon/actions/restore-gh-pages@v0
         with:
           tag: ${{ inputs.tag }}
           # asset-name: 'lecture-python-html'   # Only if the release holds two archives for the tag
 
       - name: Publish to GitHub Pages
         id: publish
-        uses: quantecon/actions/publish-gh-pages@v0.19.0
+        uses: quantecon/actions/publish-gh-pages@v0
         with:
           build-dir: ${{ steps.restore.outputs.build-dir }}
