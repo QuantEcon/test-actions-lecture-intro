@@ -64,13 +64,13 @@ jobs:
     steps:
       - name: Restore the site from the release
         id: restore
-        uses: quantecon/actions/restore-gh-pages@v0
+        uses: quantecon/actions/restore-gh-pages@v0.20.0
         with:
           tag: ${{ inputs.tag }}
           # asset-name: 'lecture-python-html'   # Only if the release holds two archives for the tag
 
       - name: Publish to GitHub Pages
         id: publish
-        uses: quantecon/actions/publish-gh-pages@v0
+        uses: quantecon/actions/publish-gh-pages@v0.20.0
         with:
           build-dir: ${{ steps.restore.outputs.build-dir }}
