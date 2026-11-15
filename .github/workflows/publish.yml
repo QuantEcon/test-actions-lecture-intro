@@ -1,28 +1,74 @@
-name: Publish to GitHub Pages
+# Publish: the canary's site on GitHub Pages
+#
+# QuantEcon/actions' templates/publish.yml at v0, run for real (QuantEcon/
+# actions #310). Its differences from the template are on purpose, and the
+# watcher in QuantEcon/actions compares the two against the list it
+# declares:
+#   - a publish* tag, as every lecture repository publishes, instead of a
+#     push to main; by hand; and weekly (#302), so that the released
+#     actions run between releases, through @v0 as consumers fetch them;
+#   - the template's release-assets job, switched on as its four documented
+#     changes describe, so a tag run attaches the site to the tag's release,
+#     which restore.yml restores from;
+#   - the template's optional notebook and PDF builds, switched on, with the
+#     HTML build copying both into the site;
+#   - the lean image, quantecon-build, as the release gate and lecture-dp
+#     use;
+#   - the deploy job checks that GitHub Pages serves this build's marker,
+#     compared by content.
+#
+# The release gate (gate.yml) deploys its fixture to the same Pages site, so
+# the site shows whichever of the two deployed last. The schedule is set
+# clear of the hours releases are made in: a run that joins the `pages`
+# group while one runs and another waits cancels the waiting one.
+#
+# Three jobs:
+#   build           restores the execution cache, so only changed notebooks
+#                   are re-executed, builds the site, and uploads it as the
+#                   run's github-pages artifact.
+#   deploy          deploys that artifact to GitHub Pages.
+#   release-assets  on a tag, attaches the site to the tag's release.
+#
+# Why three jobs: building the lectures runs code the repository does not
+# fully control (notebook cells, packages installed at build time, network
+# fetches), and code that runs earlier in a job can affect the steps after
+# it. So the Pages permissions are only in the deploy job, which runs no
+# notebook or repository code, the release upload's contents: write only in
+# the release-assets job, and the build job has only read access.
+
+name: Publish
+
 on:
   push:
     tags:
       - 'publish*'
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-  packages: read
+  workflow_dispatch:
+    # Manual trigger for re-deployment without code changes
 
+  schedule:
+    # Sunday at 12:00 UTC, 23:00 in Sydney: after cache.yml's run, and
+    # clear of the hours the release gate has been run in.
+    - cron: '0 12 * * 0'
+
+# Only one publish at a time
 concurrency:
-  group: "pages"
+  group: pages
   cancel-in-progress: false
 
 jobs:
-  publish:
-    if: github.event_name == 'push' && startsWith(github.event.ref, 'refs/tags')
+  # ─── Build ───────────────────────────────────────────────────────
+  # Builds the site and uploads it for the deploy job. It holds only read
+  # access, because it runs the notebooks.
+  build:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/quantecon/quantecon-build:latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page-url }}
+
+    permissions:
+      contents: read
+      packages: read            # Required for container image pull
+
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -30,33 +76,143 @@ jobs:
           # Full history: each page's "Last changed" date and changelog come
           # from git log. A shallow clone dates every page to the checkout commit.
           fetch-depth: 0
-      
+          # The build runs notebook code, and git log needs only the history
+          # fetched here, so leave no token in git's config for it.
+          persist-credentials: false
+
+      # ─── Environment Setup ───────────────────────────────────────
+      - name: Setup environment
+        uses: quantecon/actions/setup-environment@v0
+
+      # ─── Cache Restore ───────────────────────────────────────────
+      # Only _build/.jupyter_cache, not the whole _build, so nothing
+      # deleted from the source since the cache build, such as a removed
+      # lecture's notebook or PDF, is published again. Its key hashes
+      # the environment, so a publish never restores outputs that
+      # other packages made.
+      - name: Restore execution cache
+        uses: quantecon/actions/restore-jupyter-cache@v0
+        with:
+          cache-type: 'execution'      # _build/.jupyter_cache only
+
+      # ─── Build ───────────────────────────────────────────────────
+      # The cache gives Jupyter Book pre-executed notebooks, so only
+      # changed lectures are re-executed.
+      - name: Build notebooks
+        uses: quantecon/actions/build-lectures@v0
+        with:
+          builder: 'jupyter'
+          source-dir: 'lectures'
+
       - name: Build PDF
         uses: quantecon/actions/build-lectures@v0
         with:
-          source-dir: 'lectures'
           builder: 'pdflatex'
-          upload-failure-reports: true
-      
-      - name: Build Notebooks
-        uses: quantecon/actions/build-lectures@v0
-        with:
           source-dir: 'lectures'
-          builder: 'jupyter'
-          upload-failure-reports: true
-      
+
       - name: Build HTML
-        id: build
         uses: quantecon/actions/build-lectures@v0
         with:
-          source-dir: 'lectures'
           builder: 'html'
-          html-copy-pdf: true
-          html-copy-notebooks: true
-          upload-failure-reports: true
-      
-      - name: Deploy to GitHub Pages
-        id: deploy
+          source-dir: 'lectures'
+          extra-args: '-W --keep-going'
+          upload-failure-reports: 'true'
+          html-copy-pdf: 'true'
+          html-copy-notebooks: 'true'
+
+      # ─── Hand-off to release-assets ──────────────────────────────
+      # It comes before the Pages upload, which writes any `cname` into the
+      # site, so the release job measures the site as the build left it.
+      # include-hidden-files: upload-artifact skips files whose names start
+      # with a dot unless told otherwise, and the archive holds every file.
+      - name: Upload the site for release assets
+        if: github.ref_type == 'tag'
+        uses: actions/upload-artifact@v7
+        with:
+          name: html
+          path: _build/html
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+      # The deploy job checks that Pages serves this file, by content. It is
+      # written after the hand-off above, so the release holds the site as
+      # the build left it.
+      - name: Write this build's marker
+        run: echo "$GITHUB_SHA" > "_build/html/canary-marker-$GITHUB_RUN_ID.txt"
+
+      # ─── Upload ──────────────────────────────────────────────────
+      - name: Upload the site for GitHub Pages
         uses: quantecon/actions/publish-gh-pages@v0
         with:
-          build-dir: ${{ steps.build.outputs.build-path }}
+          mode: 'upload'            # The deploy job below deploys it
+          build-dir: '_build/html'
+
+  # ─── Deploy ──────────────────────────────────────────────────────
+  # Deploys the build job's github-pages artifact to GitHub Pages. It is the
+  # only job that holds the Pages permissions, so it runs nothing but the
+  # deploy and the check on it: no checkout, no container. It is skipped
+  # when the build job fails. The github-pages environment admits main and
+  # publish* tags.
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    permissions:
+      pages: write              # Required for GitHub Pages deployment
+      id-token: write           # Required for GitHub Pages OIDC
+
+    environment:
+      name: github-pages
+      url: ${{ steps.publish.outputs.page-url }}
+
+    steps:
+      - name: Publish to GitHub Pages
+        id: publish
+        uses: quantecon/actions/publish-gh-pages@v0
+        with:
+          mode: 'deploy'
+
+      - name: Check GitHub Pages serves this build
+        env:
+          PAGE_URL: ${{ steps.publish.outputs.page-url }}
+        run: |
+          set -uo pipefail
+          marker="canary-marker-$GITHUB_RUN_ID.txt"
+          for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            body=$(curl -fsSL --max-time 20 "${PAGE_URL%/}/$marker") && [ "$body" = "$GITHUB_SHA" ] && {
+              echo "GitHub Pages serves this build at $PAGE_URL"
+              exit 0
+            }
+            sleep 10
+          done
+          echo "::error::GitHub Pages at '$PAGE_URL' does not serve $marker with this run's commit"
+          exit 1
+
+  # ─── Release Assets ──────────────────────────────────────────────
+  # Attaches the site to the tag's GitHub release, as an archive, its
+  # checksum and a manifest, once the deploy has succeeded. It is a job of
+  # its own because the release upload needs contents: write, which neither
+  # job above should hold.
+  release-assets:
+    needs: [build, deploy]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write           # Required for the release upload
+
+    steps:
+      - name: Download the site
+        uses: actions/download-artifact@v8
+        with:
+          name: html
+          path: _build/html
+
+      - name: Attach the site to the release
+        uses: quantecon/actions/publish-gh-pages@v0
+        with:
+          mode: 'release'
+          build-dir: '_build/html'
+          asset-name: 'test-actions-lecture-intro-html'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
