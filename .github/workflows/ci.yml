@@ -7,7 +7,8 @@
 #     staged release's pull request into a staged-* branch runs, and the
 #     released actions run between releases, through @v0 as consumers
 #     fetch them;
-#   - a concurrency group that falls back to the ref off a pull request;
+#   - a concurrency group that falls back to the ref off a pull request,
+#     and cancels a run in progress for a pull request only;
 #   - the lean image, quantecon-build, as the release gate and lecture-dp
 #     use;
 #   - both Netlify and Cloudflare Pages, in the placeholder and deploy jobs,
@@ -49,10 +50,12 @@ on:
     # Sunday at 01:00 UTC, an hour after cache.yml builds the caches.
     - cron: '0 1 * * 0'
 
-# Cancel in-progress runs for the same PR, or, off a pull request, the same ref
+# Cancel in-progress runs for the same PR. Off a pull request the group is
+# the ref, and a run waits for the one before it instead: a dispatch on main
+# must not cancel the scheduled run, which the watcher would count as red.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # ─── PDF Check Switch ──────────────────────────────────────────────
 #   'true'  — pdf-check builds the PDF on every pull request (default).

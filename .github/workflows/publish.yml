@@ -47,9 +47,10 @@ on:
     # Manual trigger for re-deployment without code changes
 
   schedule:
-    # Sunday at 12:00 UTC, 23:00 in Sydney: after cache.yml's run, and
-    # clear of the hours the release gate has been run in.
-    - cron: '0 12 * * 0'
+    # Sunday at 02:00 UTC, after cache.yml's and ci.yml's runs, clear of
+    # the hours the release gate has been run in, and early enough for the
+    # watcher's 06:30 UTC run to report it before Monday's consumer builds.
+    - cron: '0 2 * * 0'
 
 # Only one publish at a time
 concurrency:
