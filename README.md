@@ -26,7 +26,7 @@ The first two are how upstream breakage gets found early, which is a sandbox's j
 
 So: **experiment in `lectures/` and the sandbox's workflows; gate in `gate/` and `gate.yml`.** If you are about to add something to make a release safer, it probably belongs in the gate, and `gate/README.md` gives its rules.
 
-It is the only place `publish-gh-pages`, `preview-netlify` and `preview-cloudflare` are exercised at all. None is testable inside the actions repo: a composite action is all-or-nothing, so `uses: ./publish-gh-pages` dies at `configure-pages` before reaching any of its own logic, and testing the previews there would need live deploy credentials on a `pull_request` workflow.
+This repository is where `publish-gh-pages`, `preview-netlify` and `preview-cloudflare` deploy for real. The actions repo's harness runs them without deploying, since a real deploy needs real sites and secrets, which its `pull_request` workflow cannot hold. The release gate deploys all three for each candidate. The sandbox's `ci.yml` and `publish.yml` deploy them through `@v0`: on pull requests and `publish*` tags, and every Sunday.
 
 **The lecture set is deliberately small.** `lectures/_toc.yml` carries five self-contained lectures rather than the full book, chosen mechanically: no build-time network access, no heavy or optional imports, no local `{doc}` cross-references, no citations. The other lectures stay on disk but are not built (`only_build_toc_files: true`).
 
