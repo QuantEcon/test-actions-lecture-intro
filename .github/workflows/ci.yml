@@ -1,69 +1,354 @@
-name: CI Preview
-on: 
+# CI: pull request previews and the PDF check
+#
+# QuantEcon/actions' templates/ci.yml at v0, run for real (QuantEcon/actions
+# #310). Its differences from the template are on purpose:
+#   - pull requests to any branch, by hand, and weekly (#302), so that a
+#     staged release's pull request into a staged-* branch runs, and the
+#     released actions run between releases, through @v0 as consumers
+#     fetch them;
+#   - a concurrency group that falls back to the ref off a pull request,
+#     and cancels a run in progress for a pull request only;
+#   - the lean image, quantecon-build, as the release gate and lecture-dp
+#     use;
+#   - both Netlify and Cloudflare Pages, in the placeholder and deploy jobs,
+#     with the canary's site, project and secret names;
+#   - save-cache on a pull request only, so that a run on main saves
+#     nothing that pull requests then restore;
+#   - off a pull request, both previews deploy to the dispatch-canary
+#     alias, and the deploy job fails unless each serves this build's
+#     marker, compared by content. The build job writes the marker, and the
+#     check reads the deploy steps' outputs, through their ids, netlify and
+#     cloudflare.
+#
+# Four jobs, as in the template:
+#   placeholder  comments on the PR within seconds of a push, with the
+#                preview's URL and links to changed pages, before the build
+#                has finished. The deploy job's comment replaces it.
+#   build        restores the execution cache, re-executes only the
+#                lectures that changed, builds the HTML, and uploads the
+#                site.
+#   deploy       deploys that site as a Netlify and a Cloudflare Pages
+#                preview, and comments on the PR with links to changed pages.
+#   pdf-check    builds the PDF from the notebooks the build job executed,
+#                because malformed LaTeX can pass the HTML build and still
+#                break the PDF build, and with it the publish. The preview
+#                never waits for it.
+#
+# Why the deploy has a job of its own: building the lectures runs code the
+# repository does not fully control (notebook cells, packages installed at
+# build time, network fetches), and code that runs earlier in a job can
+# affect the steps after it. So the deploy tokens are only ever in the
+# deploy job, which runs no notebook or repository code, and the build job
+# has no secrets and only read access. No job leaves the checkout's token in
+# git's config for later steps (persist-credentials: false).
+
+name: CI
+
+on:
   pull_request:
   workflow_dispatch:
+  schedule:
+    # Sunday at 01:00 UTC, an hour after cache.yml builds the caches.
+    - cron: '0 1 * * 0'
+
+# Cancel in-progress runs for the same PR. Off a pull request the group is
+# the ref, and a run waits for the one before it instead: a dispatch on main
+# must not cancel the scheduled run, which the watcher would count as red.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# ─── PDF Check Switch ──────────────────────────────────────────────
+#   'true'  — pdf-check builds the PDF on every pull request (default).
+#   'false' — for a site that publishes no PDF: pdf-check is skipped, and
+#             the build job uploads nothing for it.
+# It is set here, not as a repository variable, because a workflow run for
+# a pull request from a fork does not receive repository variables, so a
+# variable could not switch the check off for those.
+#
+# DISPATCH_ALIAS is where a scheduled or dispatched run deploys: its own,
+# apart from the release gate's dispatch-release-gate. A pull request
+# ignores it.
+env:
+  PDF_CHECK: 'true'
+  DISPATCH_ALIAS: 'dispatch-canary'
 
 jobs:
-  preview:
+  # ─── Placeholder ─────────────────────────────────────────────────
+  # Comments on the PR as soon as it is pushed, with the preview URL and
+  # links to the changed lecture pages, so a reviewer has them before the
+  # build finishes. Until the deploy, they show the last push deployed, or
+  # nothing on the PR's first push. The deploy job's comment then replaces
+  # this one in place, so the PR keeps one preview comment per provider.
+  #
+  # It runs no repository code and holds no secret: no checkout, no
+  # container and no needs, so it starts at once. It reads the PR's changed
+  # files from the API instead. Like the deploy, it skips pull requests from
+  # forks and from Dependabot, and it posts nothing off a pull request.
+  placeholder:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read            # Whether lectures/_toc.yml exists, for the links
+      pull-requests: write      # The PR's changed files, and the comment
+
+    steps:
+      - name: Post the preview comment
+        uses: quantecon/actions/preview-netlify@v0
+        with:
+          placeholder: 'true'
+          netlify-site-name: 'jade-tarsier-d98a19'
+          lectures-dir: 'lectures'
+
+      - name: Post the preview comment (Cloudflare Pages)
+        uses: quantecon/actions/preview-cloudflare@v0
+        with:
+          placeholder: 'true'
+          project-name: 'qe-preview-canary'
+          lectures-dir: 'lectures'
+
+  # ─── Build ───────────────────────────────────────────────────────
+  # Builds the site and hands it to the deploy job as an artifact. It holds
+  # no secrets and only read access, because it runs the notebooks.
+  build:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/quantecon/quantecon-build:latest
-    
+
     permissions:
       contents: read
-      packages: read
-      pull-requests: write
-    
+      packages: read            # Required for container image pull
+
+    # Tells pdf-check whether to run (job-level if: cannot read env).
+    outputs:
+      pdf-check: ${{ env.PDF_CHECK }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-      
-      - name: Restore Build Cache
-        id: cache
+        with:
+          # The build runs notebook code, so leave no token in git's config for it.
+          persist-credentials: false
+
+      # ─── Environment Setup ───────────────────────────────────────
+      - name: Setup environment
+        uses: quantecon/actions/setup-environment@v0
+
+      # ─── Cache Restore ───────────────────────────────────────────
+      # Restores the execution cache generated by cache.yml on main.
+      # This gives Jupyter Book pre-executed notebooks so the PR
+      # build only re-runs changed content (seconds instead of hours).
+      # Only _build/.jupyter_cache, not the whole _build, so nothing
+      # deleted from the source since the cache build, such as a removed
+      # lecture's notebook, reaches the preview. Its key hashes the
+      # environment, so a PR that changes environment.yml misses it and
+      # executes every lecture with the new packages.
+      #
+      # A pull request saves the cache it built, scoped to its branch. A
+      # run on main does not: a cache saved there reaches every pull
+      # request, and cache.yml is the one that saves main's.
+      - name: Restore execution cache
         uses: quantecon/actions/restore-jupyter-cache@v0
         with:
-          cache-type: 'build'
-          source-dir: 'lectures'
-          save-cache: 'true'
-      
-      - name: Build PDF
+          cache-type: 'execution'      # _build/.jupyter_cache only
+          save-cache: ${{ github.event_name == 'pull_request' && 'true' || 'false' }}
+
+      # ─── Build ───────────────────────────────────────────────────
+      - name: Build lectures (HTML)
         uses: quantecon/actions/build-lectures@v0
         with:
-          source-dir: 'lectures'
-          builder: 'pdflatex'
-          upload-failure-reports: true
-      
-      - name: Build Notebooks
-        uses: quantecon/actions/build-lectures@v0
-        with:
-          source-dir: 'lectures'
-          builder: 'jupyter'
-          upload-failure-reports: true
-      
-      - name: Build HTML
-        id: build
-        uses: quantecon/actions/build-lectures@v0
-        with:
-          source-dir: 'lectures'
           builder: 'html'
-          html-copy-pdf: true
-          html-copy-notebooks: true
-          upload-failure-reports: true
-      
-      # preview-cloudflare runs on every canary PR next to preview-netlify, so a
-      # release staged here (QuantEcon/actions CONTRIBUTING.md, Staged Releases)
-      # exercises both preview providers. Project: qe-preview-canary.
-      - name: Deploy to Cloudflare Pages
-        uses: quantecon/actions/preview-cloudflare@v0
+          source-dir: 'lectures'
+          extra-args: '-W --keep-going'
+          upload-failure-reports: 'true'    # Upload execution logs on failure
+
+      # The deploy job checks that each preview serves this file, by
+      # content: a Cloudflare Pages preview answers 200 for a path it does
+      # not have.
+      - name: Write this build's marker
+        run: echo "$GITHUB_SHA" > "_build/html/canary-marker-$GITHUB_RUN_ID.txt"
+
+      # ─── Hand-off to deploy ──────────────────────────────────────
+      # The deploy job starts when this job has finished, and deploys
+      # exactly these files. include-hidden-files: upload-artifact skips
+      # files whose names start with a dot unless told otherwise, and the
+      # site is deployed with every file the build wrote.
+      - name: Upload the built site for deploy
+        uses: actions/upload-artifact@v7
         with:
-          build-dir: ${{ steps.build.outputs.build-path }}
-          cloudflare-api-token: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
-          cloudflare-account-id: ${{ secrets.CLOUDFLARE_QE_ACCOUNT_ID }}
-          project-name: qe-preview-canary
-      
-      - name: Deploy to Netlify
+          name: html
+          path: _build/html
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1         # Later, re-run all jobs, not deploy alone
+          overwrite: true           # A re-run of this job replaces it
+
+      # ─── Hand-off to pdf-check ───────────────────────────────────
+      # The execution cache now holds every lecture's outputs: those the
+      # restored execution cache had, and those this build executed. pdf-check
+      # builds the PDF from it, so it executes nothing. .jupyter_cache is a
+      # hidden directory, which upload-artifact skips without
+      # include-hidden-files.
+      - name: Upload executed notebooks for pdf-check
+        if: env.PDF_CHECK == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: jupyter-cache
+          path: _build/.jupyter_cache
+          include-hidden-files: true
+          retention-days: 1         # Later, re-run all jobs, not pdf-check alone
+          overwrite: true           # A re-run of this job replaces it
+
+  # ─── Deploy ──────────────────────────────────────────────────────
+  # Deploys the build job's site to Netlify and Cloudflare Pages, and on a
+  # pull request posts a comment with each preview URL and links to changed
+  # lecture pages.
+  #
+  # The only job that holds the deploy tokens, so it runs no notebook or
+  # repository code: no container, no setup-environment, no build. It checks
+  # out the repository only so that the preview actions can work out which
+  # lectures the PR changed, from git. It is skipped when the build job
+  # fails. The preview actions themselves skip pull requests from forks and
+  # from Dependabot, whose runs get no secrets.
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read            # Required for checkout
+      pull-requests: write      # Required for PR preview comments
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          # Change detection fetches the history it needs to compare the PR
+          # with its base branch. A public repository fetches it without
+          # credentials.
+
+      # The runner's own Node may be older than the deploy CLI needs.
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          # No npm cache, which setup-node turns on by itself when the
+          # repository's package.json names npm. The preview action installs
+          # its own pinned CLI from its lockfile, so this job needs no cache.
+          package-manager-cache: false
+
+      - name: Download the built site
+        uses: actions/download-artifact@v8
+        with:
+          name: html
+          path: _build/html
+
+      # ─── PR Preview ──────────────────────────────────────────────
+      - name: Deploy PR preview
+        id: netlify
         uses: quantecon/actions/preview-netlify@v0
         with:
-          build-dir: ${{ steps.build.outputs.build-path }}
           netlify-auth-token: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           netlify-site-id: ${{ secrets.NETLIFY_SITE_ID }}
+          build-dir: '_build/html'
+          lectures-dir: 'lectures'   # Change detection for PR comment links
+          dispatch-alias: ${{ env.DISPATCH_ALIAS }}
+
+      - name: Deploy PR preview (Cloudflare Pages)
+        id: cloudflare
+        uses: quantecon/actions/preview-cloudflare@v0
+        with:
+          cloudflare-api-token: ${{ secrets.CLOUDFLARE_PAGES_TOKEN }}
+          cloudflare-account-id: ${{ secrets.CLOUDFLARE_QE_ACCOUNT_ID }}
+          project-name: 'qe-preview-canary'
+          build-dir: '_build/html'
+          lectures-dir: 'lectures'
+          dispatch-alias: ${{ env.DISPATCH_ALIAS }}
+
+      # Off a pull request nobody looks at the preview, so this checks it:
+      # each provider must report deployed, and serve the build job's marker
+      # with this run's commit. A pull request's previews are checked by
+      # whoever opened it, and one by Dependabot deploys nothing.
+      - name: Check both previews serve this build
+        if: github.event_name != 'pull_request'
+        env:
+          NETLIFY_DEPLOYED: ${{ steps.netlify.outputs.deployed }}
+          NETLIFY_URL: ${{ steps.netlify.outputs.deploy-url }}
+          CLOUDFLARE_DEPLOYED: ${{ steps.cloudflare.outputs.deployed }}
+          CLOUDFLARE_URL: ${{ steps.cloudflare.outputs.deploy-url }}
+        run: |
+          set -uo pipefail
+          marker="canary-marker-$GITHUB_RUN_ID.txt"
+          serves() { # name deployed url
+            if [ "$2" != true ]; then
+              echo "::error::$1 deployed nothing (deployed is '$2')"
+              return 1
+            fi
+            for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+              body=$(curl -fsSL --max-time 20 "${3%/}/$marker") && [ "$body" = "$GITHUB_SHA" ] && {
+                echo "$1 serves this build at $3"
+                return 0
+              }
+              sleep 10
+            done
+            echo "::error::$1 at $3 does not serve $marker with this run's commit"
+            return 1
+          }
+          failed=0
+          serves Netlify "$NETLIFY_DEPLOYED" "$NETLIFY_URL" || failed=1
+          serves "Cloudflare Pages" "$CLOUDFLARE_DEPLOYED" "$CLOUDFLARE_URL" || failed=1
+          exit "$failed"
+
+  # ─── PDF Check ───────────────────────────────────────────────────
+  # Builds the PDF and fails the PR's checks when the LaTeX build fails.
+  #
+  # It starts once the build job has finished, beside the deploy job, so the
+  # preview never waits for it, and it takes the build job's execution cache
+  # instead of executing the notebooks again. That relies on
+  # `execute_notebooks: cache` in _config.yml, which the caches need too. It
+  # is skipped when PDF_CHECK is 'false', or when the build job fails.
+  pdf-check:
+    needs: build
+    if: needs.build.outputs.pdf-check == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/quantecon/quantecon-build:latest
+
+    permissions:
+      contents: read
+      packages: read            # Required for container image pull
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup environment
+        uses: quantecon/actions/setup-environment@v0
+
+      - name: Download executed notebooks
+        uses: actions/download-artifact@v8
+        with:
+          name: jupyter-cache
+          path: _build/.jupyter_cache
+
+      # The same arguments as the PDF build in publish.yml, so this fails
+      # where it would.
+      - name: Build lectures (PDF)
+        uses: quantecon/actions/build-lectures@v0
+        with:
+          builder: 'pdflatex'
+          source-dir: 'lectures'
+          extra-args: '-W --keep-going'
+
+      # The build log above shows the LaTeX error; the .log file has the
+      # context around it.
+      - name: Upload LaTeX log on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: latex-log
+          path: _build/latex/*.log
+          if-no-files-found: ignore
+          retention-days: 7

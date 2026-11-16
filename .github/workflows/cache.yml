@@ -1,9 +1,44 @@
+# Cache Generation Workflow (Container)
+#
+# QuantEcon/actions' templates/cache.yml at v0, run for real (QuantEcon/
+# actions #310). Its one difference from the template is on purpose:
+#   - the lean image, quantecon-build, as the release gate and lecture-dp
+#     use.
+#
+# The push trigger on environment.yml is the template's, and the canary
+# keeps it. In a container build that file installs nothing, but both
+# caches' keys hash it, so without a rebuild every pull request and publish
+# after a Dependabot update to it would miss the execution cache until
+# Sunday's run.
+#
+# Creates the caches: the execution cache, which ci.yml and publish.yml
+# restore, and the build cache, the whole _build.
+# A successful run saves new caches; a failed run preserves the
+# existing ones so PRs always have something to restore.
+#
+# Triggers:
+#   - Weekly (Sunday midnight UTC) — fresh build with latest dependencies
+#   - Manual dispatch — on-demand rebuild
+#   - Push to main (environment.yml changes) — update cache after env change
+
 name: Build Cache
+
 on:
   schedule:
-    - cron: '0 3 * * 0'  # Weekly Sunday 3am
-  workflow_dispatch:
+    # Weekly on Sunday at midnight UTC
+    - cron: '0 0 * * 0'
 
+  workflow_dispatch:
+    # Manual trigger for on-demand cache rebuild
+
+  push:
+    branches:
+      - main
+    paths:
+      # Auto-rebuild when environment changes
+      - 'environment.yml'
+
+# Prevent concurrent cache builds — let prior run finish
 concurrency:
   group: cache-build
   cancel-in-progress: false
@@ -13,12 +48,12 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/quantecon/quantecon-build:latest
-    
+
     permissions:
       contents: read
-      issues: write
-      packages: read
-    
+      issues: write             # Required for auto-creating failure issues
+      packages: read            # Required for container image pull
+
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -26,10 +61,21 @@ jobs:
           # Full history: each page's "Last changed" date and changelog come
           # from git log. A shallow clone dates every page to the checkout commit.
           fetch-depth: 0
-      
-      - name: Build and Cache
+          # The build runs notebook code, and git log needs only the history
+          # fetched here, so leave no token in git's config for it.
+          persist-credentials: false
+
+      # Build all requested formats and save cache.
+      # Only saves if ALL builds succeed — preserves existing cache on failure.
+      - name: Build and cache
         uses: quantecon/actions/build-jupyter-cache@v0
         with:
           builders: 'html'
           source-dir: 'lectures'
-          create-issue-on-failure: true
+
+          # ─── Failure Handling ──────────────────────────────────
+          create-issue-on-failure: 'true'
+
+          # ─── Artifacts ─────────────────────────────────────────
+          upload-artifact: 'true'              # Upload _build when a build fails, for inspection
+          artifact-retention-days: '30'
