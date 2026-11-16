@@ -1,14 +1,15 @@
 # Cache Generation Workflow (Container)
 #
 # QuantEcon/actions' templates/cache.yml at v0, run for real (QuantEcon/
-# actions #310). Its differences from the template are on purpose, and the
-# watcher in QuantEcon/actions compares the two against the list it
-# declares:
-#   - no push trigger on environment.yml: in a container build the root
-#     environment.yml does not change the build (#34), and Dependabot
-#     updates it;
+# actions #310). Its one difference from the template is on purpose:
 #   - the lean image, quantecon-build, as the release gate and lecture-dp
 #     use.
+#
+# The push trigger on environment.yml is the template's, and the canary
+# keeps it. In a container build that file installs nothing, but both
+# caches' keys hash it, so without a rebuild every pull request and publish
+# after a Dependabot update to it would miss the execution cache until
+# Sunday's run.
 #
 # Creates the caches: the execution cache, which ci.yml and publish.yml
 # restore, and the build cache, the whole _build.
@@ -18,6 +19,7 @@
 # Triggers:
 #   - Weekly (Sunday midnight UTC) — fresh build with latest dependencies
 #   - Manual dispatch — on-demand rebuild
+#   - Push to main (environment.yml changes) — update cache after env change
 
 name: Build Cache
 
@@ -28,6 +30,13 @@ on:
 
   workflow_dispatch:
     # Manual trigger for on-demand cache rebuild
+
+  push:
+    branches:
+      - main
+    paths:
+      # Auto-rebuild when environment changes
+      - 'environment.yml'
 
 # Prevent concurrent cache builds — let prior run finish
 concurrency:

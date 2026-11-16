@@ -1,15 +1,14 @@
 # Publish: the canary's site on GitHub Pages
 #
 # QuantEcon/actions' templates/publish.yml at v0, run for real (QuantEcon/
-# actions #310). Its differences from the template are on purpose, and the
-# watcher in QuantEcon/actions compares the two against the list it
-# declares:
+# actions #310). Its differences from the template are on purpose:
 #   - a publish* tag, as every lecture repository publishes, instead of a
 #     push to main; by hand; and weekly (#302), so that the released
 #     actions run between releases, through @v0 as consumers fetch them;
 #   - the template's release-assets job, switched on as its four documented
 #     changes describe, so a tag run attaches the site to the tag's release,
-#     which restore.yml restores from;
+#     which restore.yml restores from, with the asset name
+#     test-actions-lecture-intro-html;
 #   - the template's optional notebook and PDF builds, switched on, with the
 #     HTML build copying both into the site;
 #   - the lean image, quantecon-build, as the release gate and lecture-dp

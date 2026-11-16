@@ -1,8 +1,7 @@
 # CI: pull request previews and the PDF check
 #
 # QuantEcon/actions' templates/ci.yml at v0, run for real (QuantEcon/actions
-# #310). Its differences from the template are on purpose, and the watcher
-# in QuantEcon/actions compares the two against the list it declares:
+# #310). Its differences from the template are on purpose:
 #   - pull requests to any branch, by hand, and weekly (#302), so that a
 #     staged release's pull request into a staged-* branch runs, and the
 #     released actions run between releases, through @v0 as consumers
@@ -17,7 +16,9 @@
 #     nothing that pull requests then restore;
 #   - off a pull request, both previews deploy to the dispatch-canary
 #     alias, and the deploy job fails unless each serves this build's
-#     marker, compared by content.
+#     marker, compared by content. The build job writes the marker, and the
+#     check reads the deploy steps' outputs, through their ids, netlify and
+#     cloudflare.
 #
 # Four jobs, as in the template:
 #   placeholder  comments on the PR within seconds of a push, with the
